@@ -8,7 +8,8 @@
 - **硬截止**：2026-10-31（PPT + 视频，**剩 7 天**）｜ 2026-11-08 24:00（Word 报告，**剩 15 天**）
 - **工作区**：`C:\Users\Tony Huang\SHU\大二\python\battery-health-and-lifespan-prediction`
 - **GitHub**：`https://github.com/Tony-Stank-shift/battery-health-and-lifespan-prediction`（用户已改名完成）
-- **Git**：`main` 分支；远端已有自动生成的 README，已用 `-X ours` 合并（远端提交保留，未破坏性删除）
+- **Git**：`main` 分支，已与远端建立追踪（`push -u`）；远端自动生成的 README 已用 `-X ours` 合并（远端提交保留，未破坏性删除）
+- **推送状态**：✅ **已于 2026-10-24 成功推送**（`5b2b184..50c82ed main -> main`），远端 8 个顶层条目已核实
 - **必须的本地 git 配置**：`git config --local http.sslBackend openssl` ← 没有它推送必失败，见「环境坑 5」
 
 ## 当前进度
@@ -76,7 +77,13 @@ W5–W25                    [待办]
 5. **git 推送必须用 openssl 后端**（已 `git config --local` 设好）：
    - 默认 schannel + 代理 → `AcquireCredentialsHandle failed: SEC_E_NO_CREDENTIALS`
    - 绕过代理直连 → `Connection was reset`（被阻断）
-   - **`http.sslBackend=openssl` + 保留全局代理 → 成功**（`ls-remote` 退出码 0）
+   - **`http.sslBackend=openssl` + 保留全局代理 → 读操作成功**（`ls-remote` 退出码 0）
+6. **git push 必须提权**：沙箱禁止创建命名管道，凭据管理器起不来
+   （`sh.exe: fatal error - couldn't create signal pipe, Win32 error 5`）。
+   用一次性 `sandbox_permissions=danger-full-access` 后推送成功。
+   **每次 push 都要这样，属于既定代价。**
+7. **PowerShell 的 `Get-Content` 默认按 GBK 读文件**，会把 UTF-8 的中文显示成乱码。
+   那是显示问题，不是文件问题——核对文件内容请用 Python 按 `encoding="utf-8"` 读，或 `Get-Content -Encoding UTF8`。
 
 ## 已落盘文件
 
@@ -98,7 +105,7 @@ outputs/_tmp/                  临时与验收脚本（已 gitignore）
 
 ## 待决问题
 
-1. **推送认证未验证**。`ls-remote`（读）已通，但 `push`（写）需要凭据，Windows credential manager 有没有缓存你的 GitHub 登录还不知道。**建议尽早试推一次**，别到 10-31 才发现。
+1. ✅ **推送已打通**（原问题：认证未验证）。结论：凭据管理器本身可用，但**在沙箱内无法启动**（禁止创建命名管道 `sh.exe Win32 error 5`）。**以后每次 push 都需要一次 `danger-full-access` 提权**，这是既定代价，不是故障。
 2. `outputs/_tmp/pytmp*/` 残留 pip 临时目录无法删除（chmod 受限），已 gitignore。
 
 ## 下一步
