@@ -1,0 +1,23 @@
+# ---- Python ----
+__pycache__/
+*.py[cod]
+*.egg-info/
+.ipynb_checkpoints/
+
+# ---- 虚拟环境 ----
+.venv/
+venv/
+env/
+
+# ---- 系统 ----
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ---- Office 临时文件 ----
+~$*
+
+# ---- 运行中间产物（最终图表要提交，临时文件不提交）----
+outputs/_tmp/
+outputs/_cache/
+*.log
