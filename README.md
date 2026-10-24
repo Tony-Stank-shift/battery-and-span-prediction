@@ -55,7 +55,7 @@ python src/regeneration.py     # 容量再生检测与共模分解（fig04）
 
 ## 已知数据陷阱
 
-这些都在 `src/sanity_check.py` 里做成了可复现断言（12 条，全绿）：
+这些都在 `src/sanity_check.py` 里做成了可复现断言（11 条，全绿）：
 
 - `ambient_temp_C` 全部 636 行都是 24.0 —— **零方差**，不能当特征
 - B0006 前 7 个循环容量超过额定 2 Ah（最高 2.0353 Ah）

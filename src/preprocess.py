@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (  # noqa: E402
     BATTERIES,
     EOL_THRESHOLD_AH,
+    RANDOM_SEED,
     REGEN_MIN_JUMP_AH,
     RATED_CAPACITY_AH,
     TABLE_DIR,
@@ -139,13 +140,32 @@ def regen_cross_cell_stats(df: pd.DataFrame) -> dict:
                 continue
             pairs.append(
                 {
+                    "a": a,
+                    "b": b,
                     "pair": f"{a}–{b}",
                     "pearson": float(pair[a].corr(pair[b])),
-                    "spearman": float(pair[a].corr(pair[b], method="spearman")),
                     "same_sign": float((np.sign(pair[a]) == np.sign(pair[b])).mean()),
                     "n": int(len(pair)),
                 }
             )
+
+    # 「同号率」的独立零基准：环形移位法。
+    # 不能拿 0.5 当参照——两序列各自都有强负漂移（P(Δ<0) 约 0.72–0.85），
+    # 即使完全独立，同号率也会明显高于 0.5。第三轮审查抓到了这个基准错误。
+    rng = np.random.default_rng(RANDOM_SEED)
+    n_perm = 500
+    for p in pairs:
+        sub_pair = delta[[p["a"], p["b"]]].dropna()
+        sa = np.sign(sub_pair[p["a"]].to_numpy())
+        sb = np.sign(sub_pair[p["b"]].to_numpy())
+        n = len(sa)
+        null = []
+        for _ in range(n_perm):
+            off = int(rng.integers(1, n))
+            null.append(float((sa == np.roll(sb, off)).mean()))
+        null_arr = np.asarray(null)
+        p["same_sign_null"] = float(null_arr.mean())
+        p["same_sign_p"] = float((null_arr >= p["same_sign"]).mean())
 
     peak_cycle = {c: int(delta[c].dropna().idxmax()) for c in cells if delta[c].notna().any()}
     peak_value = {c: float(delta[c].max()) for c in cells if delta[c].notna().any()}
@@ -271,7 +291,9 @@ def build_decisions(
     max_jump = float(regen_jumps.max()) if len(regen_jumps) else float("nan")
     big_pairs = [p for p in regen["pairs"] if p["n"] >= 100]
     sync_text = "；".join(
-        f"{p['pair']} Pearson {p['pearson']:.3f}、同号率 {p['same_sign']:.3f}" for p in big_pairs
+        f"{p['pair']} Pearson {p['pearson']:.3f}、同号率 {p['same_sign']:.3f}"
+        f"（环形移位零基准 {p['same_sign_null']:.3f}，置换 p={p['same_sign_p']:.3f}）"
+        for p in big_pairs
     )
     if regen["shared_peak"]:
         cyc = regen["shared_peak"][0]
@@ -370,15 +392,21 @@ def build_decisions(
                 "平滑掉等于把**现象当噪声删除**。但这里要说清一件容易被追问的事："
                 "「容量再生是锂电池的电化学现象（电解液再分布等）」目前只是**假设，未经本数据验证**，"
                 "而实测到的跨电池同步性（见证据）说明**至少一部分波动来自共模成分**——"
-                "即四块电池共同经历的实验/测量事件，而不是四个独立个体的随机物理过程。"
+                "即几块电池**共同经历**的某种成分（其来源本数据无法分辨："
+                "可能是共同的实验/测量事件，也可能是别的，本项目不主张成因），"
+                "而不是四个独立个体的随机物理过程。"
                 "因此正确处理不是「解释掉」它，而是把它拆成「共模 + 个体」两部分："
                 "共模部分进不确定性分析的「数据不确定」层，个体部分才是真正的随机波动。"
             ),
             "evidence": (
-                f"跨电池一阶差分（循环 2–132 对齐，随机同号率期望 0.5）：{sync_text}。"
+                f"跨电池一阶差分（循环 2–132 对齐）：{sync_text}。"
+                f"注意同号率的零基准不是 0.5——两条序列各自都有强负漂移"
+                f"（P(Δ<0) 约 0.72–0.85），即使完全独立同号率也会明显高于 0.5，"
+                f"所以本表用环形移位法现场估零基准，并给置换 p 值。"
                 f"{shared_peak_text}，次日三块同时出现各自最大单步跌幅"
-                f"（循环 {regen['shared_trough'][0] if regen['shared_trough'] else '—'}）；"
-                f"B0018 与另外三块的相关仅约 −0.09，说明同步性主要发生在同批次的 B0005/B0006/B0007 之间。"
+                f"（循环 {regen['shared_trough'][0] if regen['shared_trough'] else '—'}）。"
+                f"B0018 是否属于这个同步簇，见 W6 的再生分解"
+                f"（其残差与共模的相关**低于**自身独立零基准，故不属该簇）。"
             ),
         },
         {
