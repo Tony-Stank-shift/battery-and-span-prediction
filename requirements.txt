@@ -7,7 +7,7 @@ matplotlib>=3.8,<4
 scipy>=1.11,<2
 
 # 生成决策表 markdown 用（pandas.DataFrame.to_markdown 依赖它）
-tabulate>=0.9
+tabulate>=0.9,<1
 
 # 模型相关（W10 起需要；当前的数据体检阶段不需要）
 scikit-learn>=1.5,<2

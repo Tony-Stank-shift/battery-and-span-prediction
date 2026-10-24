@@ -6,11 +6,13 @@
 （温度零方差、容量超额定、容量再生、删失个体）。这些坑不能靠肉眼记，必须靠断言
 守住——换个人跑一遍，结论必须一样。
 
-最后一条：
-    C12 把 config 的 EOL 阈值和本文件写死的 EOL_REF_AH 对齐。
-    数据体检**有意**绑定 τ=1.4（NASA 惯例），与 D4 要求的 τ 扫描解耦：
-    否则一旦有人调整 EOL_RATIO 做敏感性分析，"数据健康"会变红，把
-    调参信号和数据健康信号混在一起。
+最后一个：
+    EOL 判定统一走 `config.is_at_eol()`，本文件不再硬编码比较符。
+    **本文件有意绑定 τ=1.4（NASA 惯例）与 D4 的 τ 扫描解耦**：
+    早期版本有过一条 C12 断言“config 的 EOL 阈值必须等于 1.4”，第一轮审查指出
+    那条会把数据健康信号和调参信号混在一起——W7 一旦要扫 τ，最自然的实现就是改
+    EOL_RATIO，而 C12 会让整条管线在第 1 步就中止。所以 C12 已删除，
+    W7 的扫描必须**显式传 tau 参数**，不许改常量。
 
 运行
 ----
@@ -35,9 +37,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from config import (  # noqa: E402
     BATTERIES,
     DATA_RAW,
-    EOL_THRESHOLD_AH,
     REGEN_MIN_JUMP_AH,
     RATED_CAPACITY_AH,
+    is_at_eol,
 )
 from load_data import EXPECTED_COLUMNS, add_derived, load_raw, split_by_battery  # noqa: E402
 
@@ -85,11 +87,12 @@ def regen_events(sub: pd.DataFrame) -> tuple[list[int], list[float]]:
 
 
 def eol_cycle(sub: pd.DataFrame, tau: float) -> int | None:
-    """容量首次**小于或等于** tau 的循环号；从未达到则返回 None（右删失）。
+    """容量首次到达 tau 的循环号；从未达到则返回 None（右删失）。
 
-    判定口径是 <=（含边界），与 config.EOL_COMPARISON_IS_INCLUSIVE 一致。
+    判定口径由 `config.is_at_eol()` 统一提供，本函数不硬编码比较符——
+    第一轮审查发现过「开关是死代码、调用处各自硬编码」的问题。
     """
-    hit = sub[sub["capacity_Ah"] <= tau]
+    hit = sub[is_at_eol(sub["capacity_Ah"].to_numpy(float), tau)]
     return int(hit["cycle"].iloc[0]) if len(hit) else None
 
 
@@ -187,12 +190,8 @@ def run() -> None:
         f"切分后 {total} 行 vs 原始 {len(raw)} 行",
     )
 
-    # ---- C12 config 与体检阈值一致 ----
-    check(
-        f"C12 config.EOL_THRESHOLD_AH 与体检绑定的 {EOL_REF_AH} Ah 一致",
-        close(EOL_THRESHOLD_AH, EOL_REF_AH),
-        f"config = {EOL_THRESHOLD_AH} Ah",
-    )
+    # C12 已删除：原「config 阈值必须等于 1.4」的断言会让 W7 的 τ 扫描
+    # 在改 EOL_RATIO 时把整条管线掐死（数据健康信号 vs 调参信号混在一起）。
 
 
 def report() -> int:

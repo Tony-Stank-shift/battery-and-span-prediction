@@ -35,12 +35,15 @@ pip install -r requirements.txt
 python scripts/run_all.py
 ```
 
-当前阶段（W1–W2）管线只包含**数据体检**一步，W20 会扩展成完整管线（清洗 → 探索 → 特征 → 建模 → 不确定性 → 图表 → 报告）。
+当前阶段（W1–W4）管线包含 3 步：**数据体检 → 清洗与预处理 → 退化曲线与个体差异**。
+W20 会扩展成完整管线（… → 特征 → 建模 → 不确定性 → 图表 → 报告）。
 
 也可以单独跑某一步：
 
 ```bash
-python src/sanity_check.py
+python src/sanity_check.py     # 数据体检（11 条断言）
+python src/preprocess.py       # 清洗决策表 + 个体档案
+python src/explore.py          # 退化曲线与个体差异两张图
 ```
 
 ### 关于运行环境
@@ -54,17 +57,18 @@ python src/sanity_check.py
 
 - `ambient_temp_C` 全部 636 行都是 24.0 —— **零方差**，不能当特征
 - B0006 前 7 个循环容量超过额定 2 Ah（最高 2.0353 Ah）
-- 共 12 次 >0.05 Ah 的容量回升，最大 +0.1519 Ah
+- 共 12 个「电池×循环」对出现 >0.05 Ah 的容量回升，最大 +0.1519 Ah
 - B0007 最低容量 1.4005 Ah @ 第 166 循环，**从未跌破 1.4 Ah** → 右删失
-- B0018 在第 132 循环处截断，同样未观测到失效
+- B0018 在 1.4 Ah 口径下**第 97 循环就已失效**（观测到此为止共 132 循环，最低 1.3411 Ah）—— 它是**已观测失效**，不是删失，别和 B0007 混为一谈
 
 ## 目录结构
 
 ```
-src/          分析模块（已建：config / load_data / sanity_check）
-              计划中：preprocess / regeneration / eol / features / models / evaluate / uncertainty
-scripts/      run_all.py 一键重跑（当前 1 步，W20 扩展为完整管线）
+src/          已建：config / load_data / sanity_check / preprocess / figures / explore
+              计划中：features / models / evaluate / uncertainty
+scripts/      run_all.py 一键重跑（当前 3 步，W20 扩展为完整管线）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
+              figures/fig01, fig02；tables/data_cleaning_decisions.md
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
 data/raw/     课程下发的 636 行数据

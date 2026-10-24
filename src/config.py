@@ -56,10 +56,35 @@ EOL_THRESHOLD_AH = RATED_CAPACITY_AH * EOL_RATIO
 EOL_COMPARISON_IS_INCLUSIVE = True
 """EOL 判定用 ≤ 还是 <。
 
-采用 **≤（含边界）**：容量恰好等于阈值也算"到达 EOL"。
+采用 **≤（含边界）**：容量恰好等于阈值也算「到达 EOL」。
 这条必须写死并写进报告，因为 D4 的整个右删失结论就悬在边界上——
 B0007 最低 1.4005 Ah，若某次阈值扫描恰好取到 1.4005，≤ 与 < 会给出不同答案。
 """
+
+
+def is_at_eol(capacity, tau: float | None = None):
+    """按上面的判定口径判断容量是否到达 EOL —— **唯一判定入口**。
+
+    为什么要有这个函数：第一轮第三方审查发现，此前 sanity_check 和 preprocess
+    各自硬编码 `<=`，而 `EOL_COMPARISON_IS_INCLUSIVE` 全仓库零消费者、是死代码。
+    判定口径必须只有一个出处，否则改开关不会生效、报告里写的规则和代码对不上。
+
+    参数
+    ----
+    capacity : 标量或数组
+    tau : 阈值，默认取 EOL_THRESHOLD_AH。
+          **W7 做阈值扫描时必须显式传 tau，不要改 EOL_RATIO** —— 改常量会让
+          图表、决策表、数据体检三者的口径悄悄分叉。
+
+    返回
+    ----
+    numpy 布尔数组（输入是标量时返回 0 维数组）
+    """
+    import numpy as np
+
+    threshold = EOL_THRESHOLD_AH if tau is None else float(tau)
+    cap = np.asarray(capacity, dtype=float)
+    return (cap <= threshold) if EOL_COMPARISON_IS_INCLUSIVE else (cap < threshold)
 
 # ----------------------------------------------------------------------------
 # 容量再生检测
