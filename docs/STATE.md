@@ -18,8 +18,9 @@
 W1  环境与仓库骨架        [完成] sklearn 1.9.1；git 仓库；run_all 入口可用
 W2  数据装载与体检脚本    [完成] 12/12 断言通过
 W3  清洗与预处理          [完成] 决策表 5 条 + 个体档案表，636 行 10 列，未删任何行
-W4  退化曲线              [下一步]
-W5–W25                    [待办]
+W4  退化曲线与个体差异    [完成] fig01/fig02 已生成，逐张目视核对并修图
+W5  个体差异五维量化      [下一步]
+W6–W25                    [待办]
 ```
 
 ## W3 产出（已完成）
@@ -96,7 +97,11 @@ src/config.py                  路径/常量/绘图（含 MPLCONFIGDIR 与字体
 src/load_data.py               读入 + 派生列（含泄漏警告与显式基准表）
 src/sanity_check.py            12 条可复现断言（12/12 PASS）
 src/preprocess.py              清洗决策 + 行级标记 + 个体档案 + 自动生成决策表
-scripts/run_all.py             一键入口（当前 2 步）
+src/figures.py                 绘图公共工具（保存 / EOL 线 / 额定线 / 右侧标签）
+src/explore.py                 W4–W7 探索性图表
+scripts/run_all.py             一键入口（当前 3 步）
+outputs/figures/fig01_capacity_degradation.png
+outputs/figures/fig02_individual_differences.png
 outputs/tables/data_cleaning_decisions.md   清洗决策表（代码生成，勿手改）
 docs/DECISIONS.md              D1–D15
 docs/STATE.md                  本文件
@@ -108,7 +113,19 @@ outputs/_tmp/                  临时与验收脚本（已 gitignore）
 1. ✅ **推送已打通**（原问题：认证未验证）。结论：凭据管理器本身可用，但**在沙箱内无法启动**（禁止创建命名管道 `sh.exe Win32 error 5`）。**以后每次 push 都需要一次 `danger-full-access` 提权**，这是既定代价，不是故障。
 2. `outputs/_tmp/pytmp*/` 残留 pip 临时目录无法删除（chmod 受限），已 gitignore。
 
+## W4 已完成（附注）
+
+- `fig01`：绝对退化曲线，含 EOL 线（1.4 Ah）、额定线（2.0 Ah）、EOL 交叉点（▼ 97/109/125）、
+  容量再生事件（空心圈共 12 个）、B0007 最低点（★ @166, 1.4005）+ 左下删失说明框。
+- `fig02`：(a) SOH = C/2.0 含 0.7 线，并标出 B0006 初始 SOH > 100%；
+  (b) 相对首循环归一化，用于比较「去掉初始容量差异后」的衰减形状，
+  标题已声明「仅用于展示，不得作特征」（D14）。
+- 两张图都做了**目视核对**（不是只看退出码）。第一版发现三个问题并修掉：
+  ① ▼ 标记太小被曲线盖住；② B0006 尾部被 y 轴下界切掉；③ B0007 箭头端点对不准
+  （改为星标定点 + 左侧文字，不画跨图箭头）。
+
 ## 下一步
 
-**W4 退化曲线（图1/图2）**：四体容量退化曲线 + SOH 曲线，含 EOL 阈值线、删失个体标注、再生事件点标记。
-验收：图含 EOL 线、4 个体可辨识、删失个体有标注。
+**W5 个体差异五维量化**：把个体差异拆成 水平 / 速率 / 形状 / 波动 / 寿命 五个维度，
+每维给一个数，产出 4 行 × 5 维的档案表 + 五维小多图（small multiples）。
+验收：表无空格、小多图产出、每维配一句解释。
