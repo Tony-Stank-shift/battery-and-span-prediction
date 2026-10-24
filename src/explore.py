@@ -32,33 +32,20 @@ from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 from matplotlib.lines import Line2D
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import (  # noqa: E402
-    BATTERIES,
     COLORS,
     EOL_THRESHOLD_AH,
     RATED_CAPACITY_AH,
+    is_missing as _is_missing,
     setup_matplotlib,
 )
 from figures import EOL_LABEL, draw_eol_line, draw_rated_line, label_right, save  # noqa: E402
 from load_data import load_raw, split_by_battery  # noqa: E402
 from preprocess import cell_profile, mark_rows  # noqa: E402
-
-
-def _is_missing(value) -> bool:
-    """统一判空：pd.NA / np.nan / None 都要能认出来。
-
-    踩过一次坑：`eol is not None` 对 `pd.NA` 是 True，而
-    `isinstance(pd.NA, float)` 是 False，于是 pd.NA 一路溜到 `int()` 才炸。
-    """
-    try:
-        return bool(pd.isna(value))
-    except (TypeError, ValueError):  # 非标量
-        return False
 
 
 def _set_limits(

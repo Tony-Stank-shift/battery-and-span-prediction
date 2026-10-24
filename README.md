@@ -35,7 +35,7 @@ pip install -r requirements.txt
 python scripts/run_all.py
 ```
 
-当前阶段（W1–W4）管线包含 3 步：**数据体检 → 清洗与预处理 → 退化曲线与个体差异**。
+当前阶段（W1–W5）管线包含 4 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化**。
 W20 会扩展成完整管线（… → 特征 → 建模 → 不确定性 → 图表 → 报告）。
 
 也可以单独跑某一步：
@@ -43,7 +43,8 @@ W20 会扩展成完整管线（… → 特征 → 建模 → 不确定性 → �
 ```bash
 python src/sanity_check.py     # 数据体检（11 条断言）
 python src/preprocess.py       # 清洗决策表 + 个体档案
-python src/explore.py          # 退化曲线与个体差异两张图
+python src/explore.py          # 退化曲线与个体差异（fig01/fig02）
+python src/individual.py       # 个体差异五维量化（fig03）
 ```
 
 ### 关于运行环境
@@ -64,11 +65,11 @@ python src/explore.py          # 退化曲线与个体差异两张图
 ## 目录结构
 
 ```
-src/          已建：config / load_data / sanity_check / preprocess / figures / explore
+src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual
               计划中：features / models / evaluate / uncertainty
-scripts/      run_all.py 一键重跑（当前 3 步，W20 扩展为完整管线）
+scripts/      run_all.py 一键重跑（当前 4 步，W20 扩展为完整管线）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
-              figures/fig01, fig02；tables/data_cleaning_decisions.md
+              figures/fig01, fig02, fig03；tables/data_cleaning_decisions.md, individual_differences.md
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
 data/raw/     课程下发的 636 行数据

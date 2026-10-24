@@ -86,6 +86,21 @@ def is_at_eol(capacity, tau: float | None = None):
     cap = np.asarray(capacity, dtype=float)
     return (cap <= threshold) if EOL_COMPARISON_IS_INCLUSIVE else (cap < threshold)
 
+
+def is_missing(value) -> bool:
+    """统一判空：`pd.NA` / `np.nan` / `None` / `pd.NaT` 都要能认出来。
+
+    踩过的坑：`value is not None` 对 `pd.NA` 是 True，而
+    `isinstance(pd.NA, float)` 是 False，于是 `pd.NA` 一路溜到 `int()` 才炸。
+    放在 config 里是因为 explore / individual 都要用，重复实现会被审查记成缺陷。
+    """
+    import pandas as pd
+
+    try:
+        return bool(pd.isna(value))
+    except (TypeError, ValueError):  # 非标量
+        return False
+
 # ----------------------------------------------------------------------------
 # 容量再生检测
 # ----------------------------------------------------------------------------

@@ -30,6 +30,7 @@ STEPS: list[tuple[str, Path]] = [
     ("数据体检", ROOT / "src" / "sanity_check.py"),
     ("清洗与预处理", ROOT / "src" / "preprocess.py"),
     ("退化曲线与个体差异", ROOT / "src" / "explore.py"),
+    ("个体差异五维量化", ROOT / "src" / "individual.py"),
 ]
 
 

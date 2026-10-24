@@ -19,8 +19,9 @@ W1  环境与仓库骨架        [完成] sklearn 1.9.1；git 仓库；run_all �
 W2  数据装载与体检脚本    [完成] 12/12 断言通过
 W3  清洗与预处理          [完成] 决策表 5 条 + 个体档案表，636 行 10 列，未删任何行
 W4  退化曲线与个体差异    [完成] fig01/fig02 已生成，逐张目视核对并修图
-W5  个体差异五维量化      [下一步]
-W6–W25                    [待办]
+W5  个体差异五维量化      [完成] 五维档案 + fig03（六面板）；⚠️ 加速比全 <1 是重要发现
+W6  容量再生检测与分解    [下一步]
+W7–W25                    [待办]
 ```
 
 ## W3 产出（已完成）
@@ -128,11 +129,14 @@ src/load_data.py               读入 + 派生列（含泄漏警告与显式基�
 src/sanity_check.py            12 条可复现断言（12/12 PASS）
 src/preprocess.py              清洗决策 + 行级标记 + 个体档案 + 自动生成决策表
 src/figures.py                 绘图公共工具（保存 / EOL 线 / 额定线 / 右侧标签）
-src/explore.py                 W4–W7 探索性图表
-scripts/run_all.py             一键入口（当前 3 步）
+src/explore.py                 W4 探索性图表（fig01/fig02）
+src/individual.py              W5 个体差异五维量化（fig03 + 档案表）
+scripts/run_all.py             一键入口（当前 4 步）
 outputs/figures/fig01_capacity_degradation.png
 outputs/figures/fig02_individual_differences.png
+outputs/figures/fig03_individual_differences_facets.png
 outputs/tables/data_cleaning_decisions.md   清洗决策表（代码生成，勿手改）
+outputs/tables/individual_differences.md    五维档案（代码生成，勿手改）
 docs/DECISIONS.md              D1–D15
 docs/STATE.md                  本文件
 outputs/_tmp/                  临时与验收脚本（已 gitignore）
@@ -154,8 +158,24 @@ outputs/_tmp/                  临时与验收脚本（已 gitignore）
   ① ▼ 标记太小被曲线盖住；② B0006 尾部被 y 轴下界切掉；③ B0007 箭头端点对不准
   （改为星标定点 + 左侧文字，不画跨图箭头）。
 
+## W5 已完成，以及一个必须记住的发现
+
+五维档案（`outputs/tables/individual_differences.md`）+ fig03（2×3 小多图）。
+
+| 维度 | 结果 |
+|---|---|
+| ① 水平 | 初始容量 1.8550–2.0353 Ah，极差 9.7%；B0006 初始 SOH 101.8% > 100% |
+| ② 速率 | −0.5087–−0.3269 Ah/(100循环)，最快是最慢的 **1.56 倍** |
+| ③ 形状 | 线性 R² 0.940–0.976；**加速比 0.52–0.91，全部 < 1**；二次项系数全部为正 |
+| ④ 波动 | 相对趋势 σ 0.0005–0.0122 Ah；σ 最大的两个（B0006/B0018）恰好也是再生次数最多的两个 |
+| ⑤ 寿命 | 已观测 EOL 97–125；B0007 右删失 |
+
+⚠️ **最重要的一条：加速比全部小于 1，说明后段衰减反而变缓（凸形），不是加速老化。**
+这与我原本的预设立场相反（我原以为锂电会加速衰减）。**偏差方向不在这里预设**，
+留到 W13 由模型对比实测——本项目的规则是结论先由数字给出。
+
 ## 下一步
 
-**W5 个体差异五维量化**：把个体差异拆成 水平 / 速率 / 形状 / 波动 / 寿命 五个维度，
-每维给一个数，产出 4 行 × 5 维的档案表 + 五维小多图（small multiples）。
-验收：表无空格、小多图产出、每维配一句解释。
+**W6 容量再生检测与分解**：趋势-残差双面板图 + 再生事件表；
+并按 D18 把波动拆成「共模 + 个体」两部分（共模进 W15 的数据不确定层）。
+验收：事件数 = 2/4/1/5、(电池,循环) 对 12 个且注明循环 90 三对同源、趋势-残差图产出。
