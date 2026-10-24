@@ -32,6 +32,7 @@ STEPS: list[tuple[str, Path]] = [
     ("退化曲线与个体差异", ROOT / "src" / "explore.py"),
     ("个体差异五维量化", ROOT / "src" / "individual.py"),
     ("容量再生检测与分解", ROOT / "src" / "regeneration.py"),
+    ("EOL 阈值敏感性", ROOT / "src" / "sensitivity.py"),
 ]
 
 

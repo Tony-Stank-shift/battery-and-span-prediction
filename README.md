@@ -35,7 +35,7 @@ pip install -r requirements.txt
 python scripts/run_all.py
 ```
 
-当前阶段（W1–W6）管线包含 5 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解**。
+当前阶段（W1–W7）管线包含 6 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性**。
 W20 会扩展成完整管线（… → 特征 → 建模 → 不确定性 → 图表 → 报告）。
 
 也可以单独跑某一步：
@@ -46,6 +46,7 @@ python src/preprocess.py       # 清洗决策表 + 个体档案
 python src/explore.py          # 退化曲线与个体差异（fig01/fig02）
 python src/individual.py       # 个体差异五维量化（fig03）
 python src/regeneration.py     # 容量再生检测与共模分解（fig04）
+python src/sensitivity.py      # EOL 阈值敏感性（fig05 + 断点表）
 ```
 
 ### 关于运行环境
@@ -63,14 +64,34 @@ python src/regeneration.py     # 容量再生检测与共模分解（fig04）
 - B0007 最低容量 1.4005 Ah @ 第 166 循环，**从未跌破 1.4 Ah** → 右删失
 - B0018 在 1.4 Ah 口径下**第 97 循环就已失效**（观测到此为止共 132 循环，最低 1.3411 Ah）—— 它是**已观测失效**，不是删失，别和 B0007 混为一谈
 
+## 寿命这个数字有多依赖阈值
+
+`src/sensitivity.py` 把 τ 从 1.25 扫到 1.60 Ah（断点精确计算，不用网格）：
+
+| 阈值 τ | B0005 | B0006 | B0007 | B0018 |
+|---|---|---|---|---|
+| 1.60 Ah（额定的 80%） | 75 | 63 | 86 | 45 |
+| **1.40 Ah（额定的 70%，本项目主线）** | **125** | **109** | 删失（>168） | **97** |
+| 1.30 Ah | 162 | 140 | 删失（>168） | 删失（>132） |
+
+两个必须知道的事实：
+
+1. **阈值每偏 0.01 Ah（额定容量的 0.5%），寿命差 3.0–4.4 个循环**；±0.05 Ah 的窗口里极差 22–40 循环。
+   换一种 EOL 定义（80% 额定 / 70% 或 80% 首循环），同一块电池的寿命最多差 **2.2 倍**。
+2. **但「谁先坏」的排序一次都没变**：四块都有确定寿命的全部 80 个 τ 上恒为
+   B0018 < B0006 < B0005 < B0007。同样稳定的还有一条反面事实——
+   **B0007 的「删失」只靠 0.0005 Ah 的余量成立**（= 额定容量的 0.025%），
+   阈值抬到 1.4005 Ah 它就变成「第 166 循环失效」。
+
 ## 目录结构
 
 ```
-src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual / regeneration
+src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual / regeneration / sensitivity
               计划中：features / models / evaluate / uncertainty
-scripts/      run_all.py 一键重跑（当前 5 步，W20 扩展为完整管线）
+scripts/      run_all.py 一键重跑（当前 6 步，W20 扩展为完整管线）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
-              figures/fig01–fig04；tables/data_cleaning_decisions.md, individual_differences.md, regeneration_events.md
+              figures/fig01–fig05；tables/data_cleaning_decisions.md, individual_differences.md,
+              regeneration_events.md, eol_threshold_sensitivity.md, eol_breakpoints.csv
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
 data/raw/     课程下发的 636 行数据
