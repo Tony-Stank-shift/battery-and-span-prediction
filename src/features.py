@@ -15,6 +15,12 @@
 那条禁令针对的是任务 B（跨个体迁移）；在任务 A 里 `cycle` 是 x 轴，不是「特征」。
 两者都写清楚，否则报告里「禁止用 cycle」和「模型输入含 cycle」会互相打脸。
 
+「因果」在这里的确切含义
+------------------------
+每块电池只算**一个**特征向量，时刻固定 t = K，输入数据先截断到 cycle ≤ K。
+所以只要「先截断、再算」这个顺序成立，任何特征都不可能碰到未来数据。
+泄漏检测就是去**证明这个顺序真的生效**：把 t>K 的行扰动掉，特征必须一格不变。
+
 ⚠️ 任务 B 名义 4 块电池，实际只有 3 个标签
 -------------------------------------------
 B0007 在 τ = 1.4 Ah 下**删失**（观察期内没到达 EOL），它没有 `eol_cycle`，
@@ -114,11 +120,19 @@ def _curvature(sub: pd.DataFrame) -> float:
 
 
 def _trailing_residual_std(sub: pd.DataFrame, window: int = TREND_WINDOW) -> float:
-    """**因果**残差尺度：相对「尾部滚动中位数」的残差标准差。
+    """残差尺度：相对「尾部滚动中位数」的残差标准差。
 
-    ⚠️ 这里必须用 trailing 窗口（`center=False`），不能用 W5/W6 的居中窗口：
-    居中窗口在第 t 行会用到 t+5 的容量，直接把未来信息漏进来。
-    W5 用居中是合理的（那是事后描述），用来做特征就是泄漏。
+    为什么用 trailing（`center=False`）而不是 W5/W6 的居中窗口？
+
+    ⚠️ 先纠正一个我一开始写错的说法：**在本模块的设计里，居中窗口并不构成泄漏。**
+    因为本模块对每块电池只算**一个**特征向量，时刻固定在 t = K，
+    而输入已经被截断到 cycle ≤ K —— 居中窗口在第 t 行最多用到第 K 行，没有越过 K。
+    （我原先写「用居中窗口就是泄漏」，那是把「面板式特征」的规则搬错了地方：
+    只有当特征要逐行给出 (cell, t) 且 t 可以小于 K 时，居中窗口才会看到 t 之后的真实数据。）
+
+    用 trailing 是**保守选择**，不是硬要求：它让「特征只依赖 ≤ 当前时刻」这件事
+    在代码形态上一目了然，将来若真要做面板式特征不必改定义。
+    代价是残差估计的方差略大（只用单侧）。
     """
     y = pd.Series(sub["capacity_Ah"].to_numpy(float))
     trend = y.rolling(window, min_periods=3, center=False).median()
@@ -154,7 +168,7 @@ def build_features_one(sub: pd.DataFrame, K: int) -> dict[str, float]:
         "slope_tail20_Ah_per_100": slope_tail * 100.0,
         "linear_r2_to_K": r2,
         "curvature_to_K": _curvature(sub),
-        "resid_std_causal": _trailing_residual_std(sub),
+        "resid_std_trailing": _trailing_residual_std(sub),
         "n_regen_to_K": float(len(regen)),
         "max_regen_to_K": float(regen.max()) if len(regen) else 0.0,
     }
@@ -168,7 +182,9 @@ FEATURE_DOC: dict[str, str] = {
     "slope_tail20_Ah_per_100": "末尾 20 个循环的 OLS 斜率 ×100，看最近是否加速/放缓",
     "linear_r2_to_K": "1..K 的线性拟合 R²，形状是否接近直线",
     "curvature_to_K": "1..K 的无量纲曲率（正=下弯变缓），窗口内的形状",
-    "resid_std_causal": f"相对**尾部**滚动中位数（窗口 {TREND_WINDOW}）的残差标准差，逐循环波动尺度",
+    "resid_std_trailing": (
+        f"相对**尾部**滚动中位数（窗口 {TREND_WINDOW}）的残差标准差，逐循环波动尺度"
+    ),
     "n_regen_to_K": f"1..K 内单步回升 > {REGEN_MIN_JUMP_AH} Ah 的次数",
     "max_regen_to_K": "1..K 内最大单步回升幅度（无回升记 0）",
 }
@@ -182,7 +198,7 @@ AVAILABILITY: dict[str, str] = {
     "slope_tail20_Ah_per_100": "用 K−19..K",
     "linear_r2_to_K": "用 1..K 全部行",
     "curvature_to_K": "用 1..K 全部行",
-    "resid_std_causal": f"用 1..K 全部行，但滚动中位数**只看过去**（center=False）",
+    "resid_std_trailing": "用 1..K 全部行，但滚动中位数**只看过去**（center=False）",
     "n_regen_to_K": "用 1..K 的差分",
     "max_regen_to_K": "用 1..K 的差分",
 }
@@ -465,11 +481,12 @@ def render_md(
         "只做正实验、不做负控制的检测，等价于「我保证没泄漏」——"
         "这句话在报告里没有价值，能被复现的断言才有。",
         "",
-        "顺带被这条检测挡住的一个真实陷阱：**W5/W6 用的滚动中位数是居中窗口**"
-        f"（`center=True`，窗口 {TREND_WINDOW}），第 t 行会用到 t+5 的容量。"
-        "那在事后描述里完全正确，但**拿来当特征就是泄漏**。"
-        "所以 `resid_std_causal` 用的是尾部窗口（`center=False`），"
-        f"并剔除前 {TREND_WINDOW} 个趋势不可靠的点。",
+        "顺带纠正一个我一开始写错的说法：**居中滚动窗口在本设计里并不构成泄漏。**"
+        f"因为每块电池只算**一个**特征向量、时刻固定在 t = {K_MAIN}，"
+        f"输入已截断到 cycle ≤ {K_MAIN}——居中窗口在第 t 行最多用到第 {K_MAIN} 行，没有越过。"
+        "只有「逐行给出 (cell, t) 特征且 t 可以小于 K」的面板式设计，居中窗口才会看到未来。"
+        "本模块用 trailing（`center=False`）是**保守选择**：让「只依赖 ≤ 当前时刻」"
+        "在代码形态上一目了然，代价是残差估计方差略大。",
         "",
         "## 四、与 EOL 的相关：如实列出，并说明它没有推断意义",
         "",
