@@ -22,7 +22,8 @@ W4  退化曲线与个体差异    [完成] fig01/fig02 已生成，逐张目视
 W5  个体差异五维量化      [完成] 五维档案 + fig03（六面板）；⚠️ 加速比全 <1 是重要发现
 W6  容量再生检测与分解    [完成] 12 对 / 独立 9 次 / 共模占残差方差 49.6%
 W7  EOL 阈值敏感性        [完成] 190 断点；±0.05 Ah → 30–40 循环；排序恒定、删失仅差 0.0005 Ah
-W8–W25                    [待办]
+W8  早期特征与泄漏证明    [完成] 10 个因果特征；扰动未来 436 行后逐个不变；负控制被抓到
+W9–W25                    [待办]
 ```
 
 ## W3 产出（已完成）
@@ -134,7 +135,8 @@ src/explore.py                 W4 探索性图表（fig01/fig02）
 src/individual.py              W5 个体差异五维量化（fig03 + 档案表）
 src/regeneration.py            W6 容量再生检测与分解（fig04 + 事件表）
 src/sensitivity.py             W7 EOL 阈值敏感性（fig05 + 断点表）
-scripts/run_all.py             一键入口（当前 6 步）
+src/features.py                W8 早期特征 + 未来信息泄漏证明（因果窗口 / 负控制）
+scripts/run_all.py             一键入口（当前 7 步）
 outputs/figures/fig01_capacity_degradation.png
 outputs/figures/fig02_individual_differences.png
 outputs/figures/fig03_individual_differences_facets.png
@@ -145,7 +147,8 @@ outputs/tables/individual_differences.md    五维档案（代码生成，勿手
 outputs/tables/regeneration_events.md       再生事件表（代码生成，勿手改）
 outputs/tables/eol_threshold_sensitivity.md 阈值敏感性报告（代码生成，勿手改）
 outputs/tables/eol_breakpoints.csv          完整断点表 190 行（代码生成，勿手改）
-docs/DECISIONS.md              D1–D20
+outputs/tables/early_features.md            早期特征 + 泄漏证明（代码生成，勿手改）
+docs/DECISIONS.md              D1–D21
 docs/STATE.md                  本文件
 outputs/_tmp/                  临时与验收脚本（已 gitignore）
 ```
@@ -208,8 +211,36 @@ outputs/_tmp/                  临时与验收脚本（已 gitignore）
 
 ## 下一步
 
-**W8 特征工程**：从「只看过去」的滚动/展开窗口构造特征，并给出「特征在 t 时刻可得」的
-可得性证明；`FEATURE_EXCLUDE` 的 9 列一个都不许进来（白名单断言已在 W3 建好）。
+**W9 模型 M1/M2（线性基线 + 双指数）**：任务 A（个体内轨迹外推）的两种参数化模型。
+`cycle` 在这里是回归自变量而不是特征（见 D21），任务 B 的 `cycle` 禁令不受影响。
+必须用**时序划分**（前 M 循环拟合 → 预测 M+1..N）而不是随机 KFold（D6）。
+
+## W8 已完成（第 5 轮审查覆盖 W8+W9，待派）
+
+一句话：**10 个特征全部因果（用扰动未来的办法证明），但只有 3 个可用标签，
+所以这里不做任何特征筛选。**
+
+| 结果 | 数值 |
+|---|---|
+| 特征数 | 10（K=50 循环窗口，只用 cycle ≤ K 的数据） |
+| 因果性证明 | 扰动 t>K 的 436 行 ±0.5 Ah 后，10×4 = 40 个数值**逐个不变** |
+| 负控制 | 2 个故意泄漏的对照特征**全部被抓到**（检测有分辨力） |
+| 与 EOL 的相关 | n=3（B0007 删失），\|r\| 临界 0.997；达标的特征 0 个 |
+| 符号稳定 | 7 个稳定 / **3 个随 K 翻号**（`slope_tail20`、`curvature`、`resid_std`） |
+
+**两条结构性收获**：
+
+1. **`cycle` 有两种身份**（D21）：任务 A 里是回归自变量（时间轴），任务 B 里才是
+   「不得作特征」的个体内时间。不写清这一点，报告里「禁止用 cycle」和「模型输入含 cycle」
+   会当场互相打脸——这是老师最容易一眼发现的自相矛盾。
+2. **泄漏检测必须带负控制**。只做「扰动未来后特征不变」是自证清白：
+   它测不出检测本身能否发现泄漏。加了两个故意泄漏的对照特征后，
+   「没泄漏」才变成一条可复现的断言。
+
+⚠️ 自查时抓到的两处（都是同一类错）：
+- 文档里到处写「n = 4」，实际 B0007 删失后**可用标签只有 3 个**，临界 |r| 从 0.950 变成 0.997。
+  这是第 9 次「数字是对的、论述是编的」——**样本量这种最该现算的东西，我却写死了**。
+- `|r|` 直接写进 markdown 表格，竖线被当成列分隔符，把整张表撕成两半。已改为 `\|r\|`。
 
 ## W7 已完成（待第四轮审查）
 
