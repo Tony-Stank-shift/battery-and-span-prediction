@@ -35,8 +35,8 @@ pip install -r requirements.txt
 python scripts/run_all.py
 ```
 
-当前阶段（W1–W7）管线包含 6 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性**。
-W20 会扩展成完整管线（… → 特征 → 建模 → 不确定性 → 图表 → 报告）。
+当前阶段（W1–W8）管线包含 7 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性 → 早期特征与泄漏证明**。
+W20 会扩展成完整管线（… → 建模 → 不确定性 → 图表 → 报告）。
 
 也可以单独跑某一步：
 
@@ -47,6 +47,9 @@ python src/explore.py          # 退化曲线与个体差异（fig01/fig02）
 python src/individual.py       # 个体差异五维量化（fig03）
 python src/regeneration.py     # 容量再生检测与共模分解（fig04）
 python src/sensitivity.py      # EOL 阈值敏感性（fig05 + 断点表）
+python src/features.py         # 早期特征 + 未来信息泄漏证明
+
+python scripts/mutation_test.py  # 只查「断言是不是空的」：5 个注入错误必须全部被抓
 ```
 
 ### 关于运行环境
@@ -76,22 +79,30 @@ python src/sensitivity.py      # EOL 阈值敏感性（fig05 + 断点表）
 
 两个必须知道的事实：
 
-1. **阈值每偏 0.01 Ah（额定容量的 0.5%），寿命差 3.0–4.4 个循环**；±0.05 Ah 的窗口里极差 22–40 循环。
-   换一种 EOL 定义（80% 额定 / 70% 或 80% 首循环），同一块电池的寿命最多差 **2.2 倍**。
+1. **阈值每偏 0.01 Ah（额定容量的 0.5%），寿命差 3.00–4.00 个循环**（三块非删失电池，±0.05 Ah 口径）；
+   ±0.05 Ah 的窗口里极差 **30–40 循环**。
+   ⚠️ **B0007 不能并进这两个区间**：它在 1.4005 Ah 以下就删失，有效窗口只有 0.0495 Ah，
+   所以它的 22 循环 / 每 0.01 Ah 4.44 个循环不是 ±0.05 口径的数；
+   换成等宽窗口 [1.4005, 1.5005] 后是 40 循环 / 4.00。
 2. **但「谁先坏」的排序一次都没变**：四块都有确定寿命的全部 80 个 τ 上恒为
    B0018 < B0006 < B0005 < B0007。同样稳定的还有一条反面事实——
    **B0007 的「删失」只靠 0.0005 Ah 的余量成立**（= 额定容量的 0.025%），
    阈值抬到 1.4005 Ah 它就变成「第 166 循环失效」。
 
+换一种 EOL 定义（80% 额定 / 70% 或 80% 首循环），寿命能变多少：
+**四种口径都算出确定值**的电池里最大是 **2.16 倍**（B0005：75 → 162 循环）；
+而 B0007 / B0018 在部分口径下删失，它们的比值只有下界（>1.97 / **>2.96**），
+所以真实的最大比值**至少 2.96 倍**——不能写成「最多 2.2 倍」，那是把删失当成了已知值。
+
 ## 目录结构
 
 ```
-src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual / regeneration / sensitivity
-              计划中：features / models / evaluate / uncertainty
-scripts/      run_all.py 一键重跑（当前 6 步，W20 扩展为完整管线）
+src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual / regeneration / sensitivity / features
+              计划中：models / evaluate / uncertainty
+scripts/      run_all.py 一键重跑（当前 7 步，W20 扩展为完整管线）；mutation_test.py 变异测试
 outputs/      图表与指标（全部由代码生成，不含手工修改）
               figures/fig01–fig05；tables/data_cleaning_decisions.md, individual_differences.md,
-              regeneration_events.md, eol_threshold_sensitivity.md, eol_breakpoints.csv
+              regeneration_events.md, eol_threshold_sensitivity.md, eol_breakpoints.csv, early_features.md
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
 data/raw/     课程下发的 636 行数据

@@ -76,19 +76,24 @@ def main() -> int:
         )
     )
 
-    # --- W7 变异 2：把默认 τ 偷偷改成 1.45（D17 强调必须只有一个入口）---
-    def shifted_is_at_eol(capacity, tau=None):
+    # --- W7 变异 2：扫描不再显式传 tau，偷偷用 config 常量（D17 最怕的事）---
+    # 注意：这条断言原本写的是「默认 τ 与显式 MAIN_TAU 一致」，
+    # 但 MAIN_TAU 就是 EOL_THRESHOLD_AH，两边表达式完全相同 → 恒真，
+    # 第五轮审查 F14 抓到了。断言已换成「临时改 config 常量，扫描结果必须不变」，
+    # 所以变异也要换成对应的错误：忽略传入的 tau。
+    def ignores_tau(cap, tau):
         import numpy as np
 
-        threshold = 1.45 if tau is None else float(tau)
-        return np.asarray(capacity, dtype=float) <= threshold
+        idx = np.flatnonzero(sensitivity.prefix_min_mask(cap))
+        hit = sensitivity.is_at_eol(cap[idx])  # ← 故意不传 tau，用 config 默认值
+        return int(idx[hit][0]) + 1 if hit.any() else None
 
     results.append(
         run_case(
-            "W7-M2 默认 τ 被改成分叉值（1.45）",
+            "W7-M2 断点实现忽略传入的 τ（改用 config 常量）",
             sensitivity,
-            {"attr": "is_at_eol", "new": shifted_is_at_eol},
-            "默认 τ 与显式 τ 分叉",
+            {"attr": "eol_at_exact", "new": ignores_tau},
+            "τ 没有被显式传入",
         )
     )
 
