@@ -281,6 +281,12 @@ def build_decisions(
     else:
         shared_peak_text = "未发现多块电池同时达到最大回升"
 
+    # --- 同一循环上多块电池同时回升 → 「共模事件」---
+    per_cycle = df.loc[df["is_regen"]].groupby("cycle")["battery_id"].nunique()
+    shared_event_cycles = sorted(int(c) for c in per_cycle[per_cycle >= 2].index)
+    n_shared_event_pairs = int(per_cycle[per_cycle >= 2].sum())
+    n_independent_events = n_regen - n_shared_event_pairs + len(shared_event_cycles)
+
     # --- 坑 4：右删失 ---
     censored = prof.loc[prof["censored"], "battery_id"].tolist()
     b7 = by["B0007"]
@@ -351,7 +357,9 @@ def build_decisions(
                 f"B0018 {int(prof.set_index('battery_id').loc['B0018','n_regen'])}），"
                 f"最大单次回升 **{max_jump:+.4f} Ah**（≈额定容量的 {max_jump / RATED_CAPACITY_AH * 100:.2f}%）。"
                 f"注意：{n_regen} 是「电池×循环」对计数，不是独立事件数——"
-                f"{shared_peak_text}，这三对属于同一时刻的同一件事。"
+                f"循环 {shared_event_cycles} 上有多块电池同时回升（合计 {n_shared_event_pairs} 对），"
+                f"所以**独立事件数 ≈ {n_independent_events}**。"
+                f"另一项佐证：{shared_peak_text}。"
             ),
             "chosen": (
                 "**保留原始测量值，不平滑；加 `is_regen` 标记列（禁止作特征）；"
