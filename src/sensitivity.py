@@ -207,8 +207,12 @@ def range_table(series: dict[str, tuple[np.ndarray, np.ndarray]]) -> pd.DataFram
                 "EOL@上界": str(e_hi),
                 "极差 (循环)": str(span),
                 "每 0.01 Ah 的循环数": f"{span / ((hi - lo_eff) / 0.01):.2f}",
-                "上偏 Δ": "—" if e_main is None else f"{e_lo - e_main:+d}",
-                "下偏 Δ": "—" if e_main is None else f"{e_hi - e_main:+d}",
+                # 列名必须与本行数据无关（常量字符串），否则 B0007 那种
+                # 「有效下界不同」的行会多长出一列来——首版就是这么炸的。
+                # 列名写成「@下界/@上界」而不是「上偏/下偏」：后者会被读成
+                # 「阈值上移/下移」，而这里记的是「寿命增减」，方向刚好相反。
+                "Δ寿命 @下界": "—" if e_main is None else f"{e_lo - e_main:+d}",
+                "Δ寿命 @上界": "—" if e_main is None else f"{e_hi - e_main:+d}",
             }
         )
     return pd.DataFrame(rows)
@@ -236,6 +240,45 @@ def window_sweep(series: dict[str, tuple[np.ndarray, np.ndarray]]) -> pd.DataFra
             else:
                 rec[f"±{h:g}"] = str(eol_at_exact(cap, lo) - e_hi)
         rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def grid_linearisation_error(series: dict[str, tuple[np.ndarray, np.ndarray]],
+                             step: float = 0.01, sub: int = 200) -> pd.DataFrame:
+    """0.01 Ah 网格 + 线性插值画出来的曲线，与真实阶梯的最大偏差（循环）。
+
+    为什么需要这个数：光说「网格会漏台阶」是**不严谨的**。
+    阶梯是单调的，所以网格在采样点上的取值**是精确的**；损失的只是分辨率。
+    真正会出错的是「把相邻采样点用直线连起来」这个动作——几乎所有人（包括
+    matplotlib 的默认行为）都会这么做。所以这里直接量化那个偏差：
+    在每 0.01 Ah 的格子内用 200 个点比对「线性插值值」与「真实阶梯值」。
+    """
+    lo, hi = MAIN_TAU - WINDOW_HALF, MAIN_TAU + WINDOW_HALF
+    n_cell = int(round((hi - lo) / step))
+    ts = np.round(np.arange(lo, hi + 1e-12, step), 10)
+    assert len(ts) == n_cell + 1, "网格点数与步长不符"
+    rows = []
+    for cell, (_, cap) in series.items():
+        ys = [eol_at_exact(cap, t) for t in ts]
+        fine = np.linspace(lo, hi, n_cell * sub + 1)
+        devs = []
+        for t in fine:
+            true = eol_at_exact(cap, t)
+            if true is None:  # 该点真实值删失，无法比较
+                continue
+            k = min(int((t - lo) / step), n_cell - 1)
+            if ys[k] is None or ys[k + 1] is None:
+                continue
+            frac = min(max((t - ts[k]) / step, 0.0), 1.0)
+            devs.append(abs(ys[k] + frac * (ys[k + 1] - ys[k]) - true))
+        assert devs, f"{cell} 没有可比对的点"
+        rows.append(
+            {
+                "电池": cell,
+                "0.01 网格线性插值 最大偏差 (循环)": f"{max(devs):.1f}",
+                "平均偏差 (循环)": f"{np.mean(devs):.2f}",
+            }
+        )
     return pd.DataFrame(rows)
 
 
@@ -371,6 +414,7 @@ def fig05(
     tbl_res: pd.DataFrame,
     tbl_win: pd.DataFrame,
     tbl_def: pd.DataFrame,
+    tbl_err: pd.DataFrame,
     scan: dict,
 ) -> Path:
     setup_matplotlib()
@@ -479,18 +523,22 @@ def fig05(
     xpos = np.arange(len(cells))
     dens = tbl_res["每 0.01 Ah 的台阶数"].to_numpy(float)
     n_reach = tbl_res["窗内可达 EOL 值"].to_numpy(float)
+    err = dict(
+        zip(tbl_err["电池"], tbl_err["0.01 网格线性插值 最大偏差 (循环)"].astype(float))
+    )
     ax.bar(xpos, dens, width=0.56, color=[COLORS[c] for c in cells])
-    for xi, v, k in zip(xpos, dens, n_reach):
-        ax.text(xi, v, f"{v:.2f}\n({int(k)} 个值)", ha="center", va="bottom",
-                fontsize=8.4)
+    for xi, v, k, c in zip(xpos, dens, n_reach, cells):
+        ax.text(xi, v, f"{v:.2f}\n{int(k)} 个值\n插值偏 {err[c]:.1f} 循环",
+                ha="center", va="bottom", fontsize=7.6)
     ax.axhline(1.0, color="#333333", ls="--", lw=1.2, zorder=3,
                label="0.01 Ah 网格的采样上限（每个 0.01 区间只能取 1 个值）")
     ax.set_xticks(xpos)
     ax.set_xticklabels(cells, fontsize=9)
     ax.set_ylabel("每 0.01 Ah 的台阶数")
-    ax.set_ylim(0, dens.max() * 1.34)
+    ax.set_ylim(0, dens.max() * 1.85)
     ax.legend(loc="upper right", fontsize=7.8, framealpha=0.92)
-    ax.set_title("(d) 台阶密度都 >1，所以 0.01 Ah 网格必然漏掉台阶", fontsize=10.5)
+    ax.set_title("(d) 台阶密度都 >1；把 0.01 网格的点连成线，误差 3–10 循环",
+                 fontsize=10.5)
 
     fig.suptitle("图5　EOL 阈值敏感性：同一个电池，阈值挪 0.1 Ah 寿命差多少",
                  fontsize=13, y=0.985)
@@ -508,6 +556,7 @@ def render_md(
     tbl_win: pd.DataFrame,
     tbl_res: pd.DataFrame,
     tbl_def: pd.DataFrame,
+    tbl_err: pd.DataFrame,
     scan: dict,
 ) -> str:
     cells = [c for c in BATTERIES if c in series]
@@ -527,16 +576,32 @@ def render_md(
     rng = tbl_rng.set_index("电池")
     per_001 = {c: float(rng.loc[c, "每 0.01 Ah 的循环数"]) for c in cells}
     span = {c: int(rng.loc[c, "极差 (循环)"]) for c in cells}
-    upper_shift = {c: int(rng.loc[c, "上偏 Δ"]) for c in cells if rng.loc[c, "上偏 Δ"] != "—"}
-    lower_shift = {c: int(rng.loc[c, "下偏 Δ"]) for c in cells if rng.loc[c, "下偏 Δ"] != "—"}
+    delta_cols = [c for c in rng.columns if c.startswith("Δ寿命 @")]
+    assert len(delta_cols) == 2, f"Δ 寿命列应为 2 列，实际 {delta_cols}"
+    col_lo, col_hi = delta_cols  # 「@下界」= 窗口下界处相对主线的寿命变化
+    upper_shift = {c: int(rng.loc[c, col_lo]) for c in cells if rng.loc[c, col_lo] != "—"}
+    lower_shift = {c: int(rng.loc[c, col_hi]) for c in cells if rng.loc[c, col_hi] != "—"}
     span_finite = [span[c] for c in cells if c in upper_shift]
-    asymmetric = [
-        c for c in upper_shift
-        if abs(upper_shift[c]) != abs(lower_shift[c])
-    ]
-    asym_txt = "；".join(
-        f"{c} 上偏 {upper_shift[c]:+d} / 下偏 {lower_shift[c]:+d}" for c in upper_shift
+    err_max = dict(
+        zip(tbl_err["电池"], tbl_err["0.01 网格线性插值 最大偏差 (循环)"].astype(float))
     )
+    # 占比只在「三块非删失电池」上算：B0007 的极差 22 是被截断后的窗口，
+    # 拿它当分母会把占比抬高，两个数不是同一把尺。
+    err_ratio = {c: err_max[c] / span[c] for c in cells if c in upper_shift}
+    # 「两侧变化量是否相等」这句话必须由数字生成，不能手写——
+    # 上一稿就是手写的「阈值下移影响更大」，而实测方向并不统一（D19）。
+    asym_txt = "；".join(
+        f"{c} 下移到 {MAIN_TAU - WINDOW_HALF:g} 时 {upper_shift[c]:+d}"
+        f"、上移到 {MAIN_TAU + WINDOW_HALF:g} 时 {lower_shift[c]:+d}"
+        for c in upper_shift
+    )
+    equal_side = [c for c in upper_shift if abs(upper_shift[c]) == abs(lower_shift[c])]
+    worse_on_up = [
+        c for c in upper_shift if abs(lower_shift[c]) > abs(upper_shift[c])
+    ]
+    worse_on_down = [
+        c for c in upper_shift if abs(upper_shift[c]) > abs(lower_shift[c])
+    ]
     # B0007 的等宽对照
     b7 = equal_width_span(series, "B0007", 2 * WINDOW_HALF)
     b7_narrow = (MAIN_TAU + WINDOW_HALF) - b7["lo"]
@@ -609,10 +674,25 @@ def render_md(
         tbl_res.to_markdown(index=False, disable_numparse=True),
         "",
         f"读法：台阶密度 {min(dens.values()):.2f}–{max(dens.values()):.2f}"
-        "（每 0.01 Ah 的区间里平均有几级台阶）。"
-        "把网格撒在这条轴上时，落点只会稀疏地命中少数几级台阶，"
-        "**台阶的级数与位置都看不出来（混叠）**——"
-        "这正是本模块改用断点集画图和统计的理由。",
+        "（每 0.01 Ah 的区间里平均有几级台阶）。",
+        "",
+        "但这里有一句必须说准确的话：**网格的采样值本身并没有错。**"
+        "阶梯是单调的，所以网格落在哪一点，那一点的值就是精确的；"
+        "损失的只是**分辨率**——两级相邻台阶落在同一格内时分不开。"
+        "真正会出错的是下一步：把相邻采样点用直线连起来（matplotlib 的默认行为）。"
+        "这个偏差是可以算的，见下表。",
+        "",
+        tbl_err.to_markdown(index=False, disable_numparse=True),
+        "",
+        f"（B0007 的可比区间只有 τ ≥ {censored_below(series['B0007'][1]):.4f} Ah 的部分，"
+        "删失段没有真值可比，已跳过。）",
+        "",
+        "也就是说：**用 0.01 Ah 网格画出来的寿命曲线，格子内最多偏 "
+        f"{min(err_max.values()):.1f}–{max(err_max.values()):.1f} 个循环**，"
+        f"而本节要测的阈值效应本身只有 {min(span_finite)}–{max(span_finite)} 循环。"
+        f"误差占到效应的 {min(err_ratio.values()):.0%}–{max(err_ratio.values()):.0%}——"
+        "用它做敏感性分析，等于把十分之一到四分之一的假变化混进本来就要精确读的这几十个循环里。"
+        "这就是本模块坚持用断点集画图和统计的理由。",
         "",
         f"交叉验证：两种独立实现（朴素首命中扫描 / 前缀最小断点法）在 "
         f"{len(scan['grid']) * len(cells)} 个网格点上逐点比对，**0 处不一致**；"
@@ -640,14 +720,23 @@ def render_md(
         "",
         "两个必须点出来的细节：",
         "",
-        "1. **上下偏的方向不一致，所以不能说「阈值下移影响更大」。** "
-        f"以主阈值 ±{WINDOW_HALF:g} Ah 计：{asym_txt}（循环）。"
-        f"B0005 两侧相等；{ '、'.join(c for c in asymmetric if abs(lower_shift[c]) > abs(upper_shift[c])) }"
-        " 的下偏更大（阈值抬高、判定更严，寿命缩短更多）；"
-        f"{ '、'.join(c for c in asymmetric if abs(upper_shift[c]) > abs(lower_shift[c])) }"
-        " 则相反。**方向不统一，所以本节不主张任何单一方向的不对称**——"
-        "只如实地把两个数都列出来。报告里若写「±X 循环」，必须说明这是把两侧"
-        "合起来的总宽度，不是两侧各自都等于 X。",
+        "1. **不能假设两侧对称。** "
+        f"相对于主线 τ={MAIN_TAU:g}，把阈值下移到 "
+        f"{MAIN_TAU - WINDOW_HALF:g} 与上移到 {MAIN_TAU + WINDOW_HALF:g}，"
+        f"寿命的变化分别是：{asym_txt}（循环，正 = 寿命比主线长）。",
+        "按绝对值看："
+        + (f"{'、'.join(equal_side)} 两侧相等" if equal_side else "没有一块两侧相等")
+        + (
+            f"；{'、'.join(worse_on_up)} 是「阈值上调对寿命的削减」更大"
+            if worse_on_up else ""
+        )
+        + (
+            f"；{'、'.join(worse_on_down)} 是「阈值下调带来的寿命增益」更大"
+            if worse_on_down else ""
+        )
+        + "。**方向不统一，本节因此不主张任何单一方向的不对称**——"
+        "只如实地把两个数都列出来。报告里若写「±X 循环」，必须说明这是两侧合起来的总宽度，"
+        "不是两侧各自都等于 X。",
         "2. **B0007 的窗口被删失截断。** 它在 τ < "
         f"{b7_bound:.4f} Ah 时就删失了，所以有效下界是 {b7_bound:.4f} 而不是 "
         f"{MAIN_TAU - WINDOW_HALF:g}，极差 {span['B0007']} 循环是"
@@ -722,7 +811,7 @@ def render_md(
         "「定义不确定」这一层折算成的循环数带宽（正式口径 ±"
         f"{WINDOW_HALF:g} Ah）：",
         "",
-        "| 电池 | 主线 EOL | 窗内 EOL 区间 | 总宽度 (循环) | 相对主线 |",
+        "| 电池 | 主线 EOL | 窗内 EOL 区间 | 总宽度 (循环) | 相对主线（区间两端） |",
         "|---|---|---|---|---|",
     ]
     for c in cells:
@@ -822,6 +911,7 @@ def main() -> int:
     tbl_rng = range_table(series)
     tbl_win = window_sweep(series)
     tbl_res = resolution_table(series)
+    tbl_err = grid_linearisation_error(series)
     tbl_def = definition_table(series)
     scan = invariance_scan(series)
     assert len(scan["full_orders"]) == 1, f"排序不唯一：{scan['full_orders']}"
@@ -835,7 +925,7 @@ def main() -> int:
     assert _cfg.EOL_RATIO == 0.70, "扫描过程改动了 config 的 EOL_RATIO"
 
     TABLE_MD.write_text(
-        render_md(series, tbl_key, tbl_rng, tbl_win, tbl_res, tbl_def, scan),
+        render_md(series, tbl_key, tbl_rng, tbl_win, tbl_res, tbl_def, tbl_err, scan),
         encoding="utf-8",
     )
 
@@ -858,7 +948,7 @@ def main() -> int:
             )
     pd.DataFrame(rows).to_csv(BREAK_CSV, index=False, encoding="utf-8-sig")
 
-    fig_path = fig05(series, tbl_res, tbl_win, tbl_def, scan)
+    fig_path = fig05(series, tbl_res, tbl_win, tbl_def, tbl_err, scan)
 
     print(f"扫描区间：τ ∈ [{PLAUSIBLE_LO:g}, {PLAUSIBLE_HI:g}]，网格 {len(grid)} 点 × {len(cells)} 块")
     print(f"两种实现交叉验证：{n_cmp} 次比对，0 处不一致")
