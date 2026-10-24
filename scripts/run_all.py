@@ -28,6 +28,7 @@ from config import MPLCONFIG_DIR  # noqa: E402
 
 STEPS: list[tuple[str, Path]] = [
     ("数据体检", ROOT / "src" / "sanity_check.py"),
+    ("清洗与预处理", ROOT / "src" / "preprocess.py"),
 ]
 
 
