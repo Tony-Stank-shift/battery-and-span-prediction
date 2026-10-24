@@ -1,8 +1,16 @@
 """数据体检：把这份数据的每一条事实做成**可复现的断言**。
 
-动机：这份 CSV 表面上"很干净"（0 缺失、0 重复），但里面埋着若干个会直接
-毁掉分析的坑（温度零方差、容量超额定、容量再生、删失个体）。这些坑不能靠
-肉眼记，必须靠断言守住——换个人跑一遍，结论必须一样。
+动机
+----
+这份 CSV 表面上"很干净"（0 缺失、0 重复），但里面埋着若干个会直接毁掉分析的坑
+（温度零方差、容量超额定、容量再生、删失个体）。这些坑不能靠肉眼记，必须靠断言
+守住——换个人跑一遍，结论必须一样。
+
+最后一条：
+    C12 把 config 的 EOL 阈值和本文件写死的 EOL_REF_AH 对齐。
+    数据体检**有意**绑定 τ=1.4（NASA 惯例），与 D4 要求的 τ 扫描解耦：
+    否则一旦有人调整 EOL_RATIO 做敏感性分析，"数据健康"会变红，把
+    调参信号和数据健康信号混在一起。
 
 运行
 ----
@@ -26,27 +34,45 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from config import (  # noqa: E402
     BATTERIES,
+    DATA_RAW,
     EOL_THRESHOLD_AH,
     REGEN_MIN_JUMP_AH,
+    RATED_CAPACITY_AH,
 )
 from load_data import EXPECTED_COLUMNS, add_derived, load_raw, split_by_battery  # noqa: E402
 
-# 期望值——全部来自对原始 CSV 的实测，不是猜的
+# ---------------------------------------------------------------------------
+# 期望值：全部来自对原始 CSV 的实测，不是猜的
+# ---------------------------------------------------------------------------
 EXP_RECORDS = 636
 EXP_CYCLES = {"B0005": 168, "B0006": 168, "B0007": 168, "B0018": 132}
-EXP_AMBIENT_TEMPS = [24.0]
-EXP_OVERRATED_CYCLES = 7          # B0006 第 1–7 循环超过额定 2.0 Ah
+EXP_AMBIENT_TEMP = 24.0
+EXP_OVERRATED_N = 7          # B0006 第 1–7 循环超过额定容量
 EXP_OVERRATED_MAX = 2.0353
 EXP_REGEN_EVENTS = {"B0005": 2, "B0006": 4, "B0007": 1, "B0018": 5}
 EXP_REGEN_MAX_JUMP = 0.1519
-EXP_EOL_AT_1_4 = {"B0005": 125, "B0006": 109, "B0007": None, "B0018": 97}
+
+EOL_REF_AH = 1.4             # 体检绑定的阈值，有意与 config 解耦（见文件头）
+EXP_EOL_AT_REF = {"B0005": 125, "B0006": 109, "B0007": None, "B0018": 97}
 EXP_B0007_MIN = 1.4005
+
+EXPECTED_HEADER = ",".join(EXPECTED_COLUMNS)
+
+# 容差：数据只记录到 4 位小数，任何真实改动都会差 >= 1e-4。
+# 因此用 1e-9 + rtol=0 做"精确比较"是安全的，而且比 np.isclose 的默认
+# rtol=1e-5 严格得多（默认 rtol 会让 atol 参数基本失效）。
+TOL = 1e-9
 
 _results: list[tuple[str, bool, str]] = []
 
 
 def check(name: str, ok: bool, detail: str = "") -> None:
     _results.append((name, bool(ok), detail))
+
+
+def close(a: float, b: float) -> bool:
+    """显式关掉 rtol，避免默认 rtol=1e-5 悄悄放大容差。"""
+    return bool(np.isclose(a, b, rtol=0.0, atol=TOL))
 
 
 def regen_events(sub: pd.DataFrame) -> tuple[list[int], list[float]]:
@@ -59,7 +85,10 @@ def regen_events(sub: pd.DataFrame) -> tuple[list[int], list[float]]:
 
 
 def eol_cycle(sub: pd.DataFrame, tau: float) -> int | None:
-    """容量首次跌破 tau 的循环号；从未跌破则返回 None（右删失）。"""
+    """容量首次**小于或等于** tau 的循环号；从未达到则返回 None（右删失）。
+
+    判定口径是 <=（含边界），与 config.EOL_COMPARISON_IS_INCLUSIVE 一致。
+    """
     hit = sub[sub["capacity_Ah"] <= tau]
     return int(hit["cycle"].iloc[0]) if len(hit) else None
 
@@ -69,18 +98,19 @@ def run() -> None:
     df = add_derived(raw)
     by = split_by_battery(df)
 
-    # ---- C1 规模 ----
+    # ---- C1 记录数（列数交给 C2 对文件头断言，避免恒真）----
     check(
-        "C1 数据规模 = 636 行 × 4 列",
-        raw.shape == (EXP_RECORDS, len(EXPECTED_COLUMNS)),
-        f"实际 {raw.shape[0]} 行 × {raw.shape[1]} 列",
+        f"C1 数据记录数 = {EXP_RECORDS}",
+        len(raw) == EXP_RECORDS,
+        f"实际 {len(raw)} 行",
     )
 
-    # ---- C2 列名 ----
+    # ---- C2 原始文件表头（同时验证 BOM 已剥掉）----
+    header = DATA_RAW.read_text(encoding="utf-8-sig").splitlines()[0].strip()
     check(
-        "C2 列名与数据说明一致",
-        list(raw.columns) == EXPECTED_COLUMNS,
-        f"实际 {list(raw.columns)}",
+        "C2 原始文件表头与数据说明一致（含 BOM 处理）",
+        header == EXPECTED_HEADER,
+        f"实际 '{header}'",
     )
 
     # ---- C3 缺失值 ----
@@ -93,9 +123,10 @@ def run() -> None:
 
     # ---- C5 温度零方差（最大的坑）----
     temps = sorted(raw["ambient_temp_C"].unique().tolist())
+    temp_ok = len(temps) == 1 and close(temps[0], EXP_AMBIENT_TEMP)
     check(
         "C5 ambient_temp_C 是零方差列（唯一值仅 1 个）",
-        len(temps) == len(EXP_AMBIENT_TEMPS) and np.allclose(temps, EXP_AMBIENT_TEMPS),
+        temp_ok,
         f"唯一取值 {temps} → 不能当特征，任何「温度 vs 容量」相关性分析都会退化",
     )
 
@@ -115,45 +146,67 @@ def run() -> None:
             gaps[b] = "有断档"
     check("C7 各电池循环号 1..n 连续无断档", not gaps, f"异常 {gaps}" if gaps else "全部连续")
 
-    # ---- C8 容量超额定（B0006 前 7 循环）----
+    # ---- C8 容量超额定（用 config 常量，不硬编码 2.0）----
     b6 = by["B0006"]
-    over = b6[b6["capacity_Ah"] > 2.0]
+    over = b6[b6["capacity_Ah"] > RATED_CAPACITY_AH]
     check(
-        "C8 B0006 前 7 循环容量超过额定 2.0 Ah",
-        len(over) == EXP_OVERRATED_CYCLES
-        and over["cycle"].tolist() == list(range(1, EXP_OVERRATED_CYCLES + 1))
-        and np.isclose(over["capacity_Ah"].max(), EXP_OVERRATED_MAX, atol=1e-6),
+        f"C8 B0006 前 {EXP_OVERRATED_N} 循环容量超过额定 {RATED_CAPACITY_AH} Ah",
+        len(over) == EXP_OVERRATED_N
+        and over["cycle"].tolist() == list(range(1, EXP_OVERRATED_N + 1))
+        and close(float(over["capacity_Ah"].max()), EXP_OVERRATED_MAX),
         f"{len(over)} 条，最高 {over['capacity_Ah'].max():.4f} Ah（物理上可疑，需在清洗章节说明）",
     )
 
-    # ---- C9 容量再生事件 ----
+    # ---- C9 容量再生事件（空列表也要能正常报 FAIL 而不是崩）----
     got_events = {b: len(regen_events(sub)[0]) for b, sub in by.items()}
     all_jumps = [j for sub in by.values() for j in regen_events(sub)[1]]
+    max_jump = max(all_jumps, default=float("nan"))
     check(
         "C9 容量再生事件数 = 2/4/1/5，最大回升 0.1519 Ah",
-        got_events == EXP_REGEN_EVENTS
-        and np.isclose(max(all_jumps), EXP_REGEN_MAX_JUMP, atol=1e-4),
-        f"实际 {got_events}，最大回升 {max(all_jumps):.4f} Ah（是物理现象，不是噪声）",
+        got_events == EXP_REGEN_EVENTS and close(max_jump, EXP_REGEN_MAX_JUMP),
+        f"实际 {got_events}，最大回升 {max_jump:.4f} Ah（是物理现象，不是噪声）",
     )
 
-    # ---- C10 EOL 与删失 ----
-    got_eol = {b: eol_cycle(sub, EOL_THRESHOLD_AH) for b, sub in by.items()}
+    # ---- C10 EOL 与删失：断言"结论"，而不只是复读数值 ----
+    got_eol = {b: eol_cycle(sub, EOL_REF_AH) for b, sub in by.items()}
     b7_min = float(by["B0007"]["capacity_Ah"].min())
+    never_crossed = b7_min > EOL_REF_AH
     check(
         "C10 EOL(1.4 Ah) = 125/109/未到达/97，B0007 为右删失",
-        got_eol == EXP_EOL_AT_1_4 and np.isclose(b7_min, EXP_B0007_MIN, atol=1e-6),
-        f"实际 {got_eol}；B0007 最低 {b7_min:.4f} Ah，距阈值仅差 {b7_min - EOL_THRESHOLD_AH:.4f} Ah",
+        got_eol == EXP_EOL_AT_REF
+        and close(b7_min, EXP_B0007_MIN)
+        and never_crossed,
+        f"实际 {got_eol}；B0007 最低 {b7_min:.4f} Ah，距阈值差 {b7_min - EOL_REF_AH:.4f} Ah",
+    )
+
+    # ---- C11 切分不丢行（防 split_by_battery 静默丢电池）----
+    total = sum(len(s) for s in by.values())
+    check(
+        "C11 按电池切分后总行数守恒",
+        total == len(raw),
+        f"切分后 {total} 行 vs 原始 {len(raw)} 行",
+    )
+
+    # ---- C12 config 与体检阈值一致 ----
+    check(
+        f"C12 config.EOL_THRESHOLD_AH 与体检绑定的 {EOL_REF_AH} Ah 一致",
+        close(EOL_THRESHOLD_AH, EOL_REF_AH),
+        f"config = {EOL_THRESHOLD_AH} Ah",
     )
 
 
 def report() -> int:
-    width = max(len(n) for n, _, _ in _results) + 2
+    if not _results:
+        print("未运行 run()，没有任何断言结果")
+        return 1
+
     print("=" * 78)
     print("数据体检报告")
     print("=" * 78)
     for name, ok, detail in _results:
         flag = "PASS" if ok else "FAIL"
-        print(f"[{flag}] {name:<{width}} {detail}")
+        # 不做定宽补齐：中文是双宽字符，按 len() 补齐一定错位
+        print(f"[{flag}] {name} | {detail}")
     n_fail = sum(1 for _, ok, _ in _results if not ok)
     print("-" * 78)
     print(f"共 {len(_results)} 条断言：{len(_results) - n_fail} 通过，{n_fail} 失败")

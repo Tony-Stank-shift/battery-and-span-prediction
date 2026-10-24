@@ -1,9 +1,13 @@
-# 运行分析管线与生成图表所需
-numpy>=2.0
-pandas>=2.0
-matplotlib>=3.8
-scipy>=1.11
-scikit-learn>=1.5
+# 分析管线核心依赖（当前阶段只需要这些）
+# 上界故意收紧：pandas 2.x 与 3.x 的 Copy-on-Write 默认行为不同，
+# 不锁上界会让不同机器上的行为不一致。
+numpy>=2.0,<3
+pandas>=3,<4
+matplotlib>=3.8,<4
+scipy>=1.11,<2
+
+# 模型相关（W10 起需要；当前的数据体检阶段不需要）
+scikit-learn>=1.5,<2
 
 # 仅生成 Word 报告需要（分析管线不依赖）
-python-docx>=1.1
+python-docx>=1.1,<2
