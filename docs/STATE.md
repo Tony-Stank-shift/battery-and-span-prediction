@@ -6,8 +6,9 @@
 - **组号**：20 ｜ **题号**：3 ｜ **个人独立完成**
 - **今天**：**2026-10-24（周六）** ← 已核实（首次记录误写为 10-22，会话跨了两天，已更正）
 - **硬截止**：2026-10-31（PPT + 视频，**剩 7 天**）｜ 2026-11-08 24:00（Word 报告，**剩 15 天**）
-- **工作区**：`C:\Users\Tony Huang\SHU\大二\python\battery-health-and-span-prediction`
-- **Git**：`main` 分支
+- **工作区**：`C:\Users\Tony Huang\SHU\大二\python\battery-health-and-lifespan-prediction`
+  （2026-10-24 由 `...-span-prediction` 改名；本地目录已改，**GitHub 侧改名待用户在网页操作**）
+- **Git**：`main` 分支；`origin` = `https://github.com/Tony-Stank-shift/battery-health-and-lifespan-prediction.git`（仓库尚未推送）
 
 ## 当前进度
 
@@ -73,8 +74,13 @@ outputs/_tmp/                  临时与验收脚本（已 gitignore）
 
 ## 待决问题
 
-1. **仓库名疑似笔误**：`battery-health-and-span-prediction` 的 `span` 疑为 `lifespan`。报告附录会写此链接、老师会点开。**推送前改名成本最低。** 等用户拍板。
-2. `outputs/_tmp/pytmp/` 下残留 pip 临时目录无法删除（chmod 受限），已被 gitignore，不影响。
+1. **GitHub 侧改名未完成**（用户已批准改名，本地已改）。
+   目标名：`battery-health-and-lifespan-prediction`。
+   待用户在本机网页操作：`https://github.com/Tony-Stank-shift/battery-health-and-span-prediction/settings`
+   → 第一栏 Repository name 改为上面那个 → 点 Rename（旧 URL 会自动重定向，不会断）。
+   改完我这边 `origin` 已指向新名字，可直接 push。**W24 之前必须完成。**
+2. **推送凭据未知**：Windows 的 git credential manager 是否已缓存 GitHub 凭据尚未验证。若 push 时弹出浏览器登录，需要用户配合一次。
+3. `outputs/_tmp/pytmp*/` 下残留 pip 临时目录无法删除（chmod 受限），已被 gitignore，不影响。
 
 ## 下一步
 
