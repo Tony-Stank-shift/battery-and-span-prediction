@@ -42,6 +42,7 @@ STEPS: list[tuple[str, Path]] = [
     ("M3 随机森林（外推失效）", ROOT / "src" / "models_ml.py"),
     ("M4 趋势 + GPR", ROOT / "src" / "models_gpr.py"),
     ("四模型对比主表", ROOT / "src" / "compare.py"),
+    ("三层不确定性", ROOT / "src" / "uncertainty.py"),
 ]
 
 

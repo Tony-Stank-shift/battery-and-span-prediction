@@ -62,6 +62,7 @@ def main() -> int:
     import features
     import evaluate
     import compare
+    import uncertainty
     import models_ml
     import models_parametric
     import models_gpr
@@ -336,6 +337,56 @@ def main() -> int:
         )
     )
 
+
+    # --- W15 变异 1：RSS 换成算术平均（合并比单层还窄）---
+    _orig_combine = uncertainty.combine
+
+    def mean_combine(tbl):
+        out = _orig_combine(tbl)
+        out["rss"] = (out["定义层半宽"] + out["模型层半极差"] + out["数据层半宽"]) / 3.0
+        return out
+
+    results.append(
+        run_case(
+            "W15-M1 三层用算术平均合并（合并比单层还窄）",
+            uncertainty,
+            {"attr": "combine", "new": mean_combine},
+            "RSS 合并比某一单层还窄",
+        )
+    )
+
+    # --- W15 变异 2：SUM 换成取最小值（最坏情况比 RSS 还窄）---
+    def min_combine(tbl):
+        out = _orig_combine(tbl)
+        out["sum"] = out[
+            ["定义层半宽", "模型层半极差", "数据层半宽"]
+        ].min(axis=1)
+        return out
+
+    results.append(
+        run_case(
+            "W15-M2 「最坏情况」用取最小代替相加",
+            uncertainty,
+            {"attr": "combine", "new": min_combine},
+            "最坏情况合并比 RSS 还窄",
+        )
+    )
+
+    # --- W15 变异 3：定义层算错（窗口取反），与 W7 发表的数字对不上 ---
+    _orig_def = uncertainty.layer_definition
+
+    def wrong_window(series):
+        out = _orig_def(series)
+        return {k: (v[0] + 1.0, v[1]) for k, v in out.items()}
+
+    results.append(
+        run_case(
+            "W15-M3 定义层极差算错（与 W7 发表的数对不上）",
+            uncertainty,
+            {"attr": "layer_definition", "new": wrong_window},
+            "与 W7 发表的",
+        )
+    )
 
     # --- W13 变异 1：某个模型的表少一块电池（"只比能比的"这种偷懒）---
     _orig_collect = compare.collect
