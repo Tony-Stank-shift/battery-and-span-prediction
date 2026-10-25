@@ -4,20 +4,20 @@
 
 ---
 
-# 🔖 交接快照（2026-10-24，R6 修完后更新）
+# 🔖 交接快照（2026-10-24，W11 完成后更新）
 
 ## 一句话位置
 
-**W1–W10 已完成，R6（W9+W10）审查已修完；下一步做 W11（M4 趋势 + GPR）。**
-远端 `e43eaaf`；本轮改动（含 R6 修复）已一并提交。
+**W1–W11 已完成，R6 已修完；下一步做 W12（评估框架：LOBOCV + 指标汇总）。**
+远端 `0133709`；W11 的改动尚未提交。
 
 ## 复现命令（全部已验，退出码 0）
 
 ```powershell
 cd "C:\Users\Tony Huang\SHU\大二\python\battery-health-and-lifespan-prediction"
 $env:PYTHONIOENCODING="utf-8"          # 不加会中文乱码
-python scripts/run_all.py              # 10 步主管线
-python scripts/mutation_test.py        # 16/16：证明断言不是空的
+python scripts/run_all.py              # 11 步主管线
+python scripts/mutation_test.py        # 18/18：证明断言不是空的
 python scripts/adversarial_test.py     # 43/43：证明病态输入不会静默给错答案
 ```
 
@@ -41,6 +41,7 @@ python scripts/adversarial_test.py     # 43/43：证明病态输入不会静默�
 | `src/evaluate.py` | **W12 前置：时序划分 + 指标 + EOL 误差口径（四模型唯一出处）** | `eval_setup.md` |
 | `src/models_parametric.py` | W9 M1 线性 / M2 双指数 + 可辨识性诊断 + 参数扰动敏感性 | `fig06`、`model_parametric.md` |
 | `src/models_ml.py` | W10 M3 随机森林（**外推失效反例**）+ 深度/树数/去趋势三诊断 | `fig07`、`fig08`、`model_rf.md` |
+| `src/models_gpr.py` | W11 M4 趋势+GPR：两层方差相加 + 后验采样出 EOL 分布 | `fig09`、`fig10`、`model_gpr.md` |
 
 ## 必须记住的七条硬口径（违反就是缺陷）
 
@@ -101,16 +102,16 @@ R5 W8（2h/8m/4l）｜**R6 W9–W10（3h/5m/4l）**——全部修完。
 ## 剩余工作（W10–W25）与审查节奏
 
 ```
-W10 M3 随机森林（外推失效反例）   ← 已完成（含 4 条结构断言 + 4 个变异用例）
-W11 M4 趋势 + GPR                 ← 下一步
-W12 评估框架（LOBOCV + 指标汇总；evaluate.py 已有基础）
+W10 M3 随机森林（外推失效反例）   ← 已完成
+W11 M4 趋势 + GPR                 ← 已完成（两层方差 + 后验 EOL 分布）
+W12 评估框架（LOBOCV + 指标汇总；evaluate.py 已有基础）  ← 下一步
 W13 模型对比主表                  ← 单独审
 W14 三层不确定性折算到循环数
 W15 最早可信预警时间（lead time）
 W16 误差放大分析
 W17 预测区间校准（PICP / MPIW）
 W18 更换策略与数据支撑            ← 单独审
-W19 图表统一成稿（fig09+）
+W19 图表统一成稿（fig11+）
 W20 run_all 完整管线
 W21 Word 报告（模板 9 章）        ← 单独审
 W22 PPT（≤10 页）
@@ -120,7 +121,7 @@ W25 收官大检查
 ```
 
 审查：每 2 项一轮；W13 / W18 / W21 各自单独占一轮（D16）。
-**R6 = W9+W10 已修完**；下一轮 R7 = W11+W12。
+**下一轮 R7 = W11+W12**。
 
 ## 时间
 

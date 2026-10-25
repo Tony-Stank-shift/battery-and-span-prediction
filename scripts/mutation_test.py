@@ -3,7 +3,7 @@
 一个从不失败的断言等于没有断言。做法是手工注入已知错误，
 看对应的断言是否**按预期炸掉**。每次注入都必须让管线以非零退出码结束。
 
-当前 **16 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + 一条回归用例（W8-R1）。
+当前 **18 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + 一条回归用例（W8-R1）。
 
 它真的抓到过东西（不只是验证代码）：
 1. 最初我给 W8 写的变异是「把 trailing 滚动窗口换成居中窗口」，预期泄漏检测会炸——
@@ -15,7 +15,7 @@
 
 用法
 ----
-    python scripts/mutation_test.py      # 16/16 通过才说明这些断言不是空的
+    python scripts/mutation_test.py      # 18/18 通过才说明这些断言不是空的
 """
 
 from __future__ import annotations
@@ -60,6 +60,7 @@ def main() -> int:
     import features
     import models_ml
     import models_parametric
+    import models_gpr
 
     _orig_build = features.build_features  # W8 三个变异都以原函数为基底
     _orig_cap_series = sensitivity.cap_series  # W7-M4 也要
@@ -331,6 +332,48 @@ def main() -> int:
         )
     )
 
+
+    # --- W11 变异 1：把「趋势参数方差」从带宽里去掉，只留残差方差 ---
+    # 这是 M4 存在理由的反面：去掉以后带宽不再随距离张开，
+    # structure_checks 的第 5 条断言（远处趋势方差必须占大头）会当场失败。
+    _orig_predict_gpr = models_gpr.predict_gpr
+    _orig_fit_gpr = models_gpr.fit_gpr
+
+    def no_trend_var(model, t, with_trend_var=True):
+        return _orig_predict_gpr(model, t, with_trend_var=False)
+
+    results.append(
+        run_case(
+            "W11-M1 带宽里去掉趋势参数方差（只留残差噪声）",
+            models_gpr,
+            {"attr": "predict_gpr", "new": no_trend_var},
+            "带宽主要由趋势项提供",
+        )
+    )
+
+    # --- W11 变异 2：把噪声下限去掉，让 GP 逐点插值（第一版真踩过的坑）---
+    def interpolating_fit(t, y, seed=models_gpr.GP_SEED, n_restarts=2):
+        import numpy as np
+        from sklearn.gaussian_process import GaussianProcessRegressor
+        from sklearn.gaussian_process.kernels import RBF, ConstantKernel
+
+        mod = _orig_fit_gpr(t, y, seed=seed, n_restarts=n_restarts)
+        resid = np.asarray(y, float) - models_gpr.trend_line(mod["trend"], t)
+        gp = GaussianProcessRegressor(
+            kernel=ConstantKernel(1.0, (1e-3, 1e3)) * RBF(10.0, (1e-1, 1e4)),
+            alpha=1e-12, normalize_y=False, random_state=seed,
+        )
+        gp.fit(np.asarray(t, float).reshape(-1, 1), resid)
+        return {**mod, "gp": gp, "length_scale": float(gp.kernel_.k2.length_scale)}
+
+    results.append(
+        run_case(
+            "W11-M2 去掉噪声下限，GP 变成逐点插值",
+            models_gpr,
+            {"attr": "fit_gpr", "new": interpolating_fit},
+            "逐点插值",
+        )
+    )
 
     # --- W9 变异 5：把「外推单调」的判据区间改回 [1, 5N]（第六轮审查抓到的真 bug）---
     # 老口径把训练段内那点上翘也算进去，于是 B0005/B0007 被判成"外推不单调"→ 不给寿命。

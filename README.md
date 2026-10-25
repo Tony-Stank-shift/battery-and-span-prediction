@@ -35,7 +35,7 @@ pip install -r requirements.txt
 python scripts/run_all.py
 ```
 
-当前阶段（W1–W10）管线包含 10 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性 → 早期特征与泄漏证明 → 评测口径 → M1/M2 参数模型 → M3 随机森林（外推失效反例）**。
+当前阶段（W1–W11）管线包含 11 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性 → 早期特征与泄漏证明 → 评测口径 → M1/M2 参数模型 → M3 随机森林（外推失效反例）→ M4 趋势+GPR**。
 W20 会扩展成完整管线（… → 不确定性 → 图表 → 报告）。
 
 也可以单独跑某一步：
@@ -51,8 +51,9 @@ python src/features.py           # 早期特征 + 未来信息泄漏证明
 python src/evaluate.py           # 评测口径（时序划分 / 指标 / EOL 误差）
 python src/models_parametric.py  # M1 线性 / M2 双指数（fig06）
 python src/models_ml.py          # M3 随机森林：外推失效（fig07/fig08）
+python src/models_gpr.py         # M4 趋势 + GPR：EOL 后验分布（fig09/fig10）
 
-python scripts/mutation_test.py  # 只查「断言是不是空的」：16 个注入错误必须全部被抓
+python scripts/mutation_test.py  # 只查「断言是不是空的」：18 个注入错误必须全部被抓
 python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/单点/空表…）不许静默给错答案
 ```
 
@@ -102,14 +103,15 @@ python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/
 
 ```
 src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual /
-              regeneration / sensitivity / features / evaluate / models_parametric / models_ml
-              计划中：uncertainty / 其余模型（W11 起）
-scripts/      run_all.py 一键重跑（当前 10 步，W20 扩展为完整管线）；
-              mutation_test.py 变异测试（16 条）；adversarial_test.py 病态输入测试（43 条）
+              regeneration / sensitivity / features / evaluate / models_parametric / models_ml /
+              models_gpr
+              计划中：uncertainty（三层不确定性折算）/ 图表统一（W19）
+scripts/      run_all.py 一键重跑（当前 11 步，W20 扩展为完整管线）；
+              mutation_test.py 变异测试（18 条）；adversarial_test.py 病态输入测试（43 条）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
-              figures/fig01–fig08；tables/data_cleaning_decisions.md, individual_differences.md,
+              figures/fig01–fig10；tables/data_cleaning_decisions.md, individual_differences.md,
               regeneration_events.md, eol_threshold_sensitivity.md, eol_breakpoints.csv,
-              early_features.md, eval_setup.md, model_parametric.md, model_rf.md
+              early_features.md, eval_setup.md, model_parametric.md, model_rf.md, model_gpr.md
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
 data/raw/     课程下发的 636 行数据

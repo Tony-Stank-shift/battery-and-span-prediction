@@ -1,7 +1,7 @@
 """一键复现入口。
 
-当前包含 W1–W10 的 10 个步骤；W20 会把它扩展成完整管线
-（建模 → 不确定性 → 图表 → 报告）。
+当前包含 W1–W11 的 11 个步骤；W20 会把它扩展成完整管线
+（不确定性 → 图表 → 报告）。
 
 注意：`scripts/mutation_test.py` 不在这里。它验证的是「断言会不会失败」，
 不产出任何数据，属于自检工具，单独跑。
@@ -40,6 +40,7 @@ STEPS: list[tuple[str, Path]] = [
     ("评测口径", ROOT / "src" / "evaluate.py"),
     ("M1 线性 / M2 双指数", ROOT / "src" / "models_parametric.py"),
     ("M3 随机森林（外推失效）", ROOT / "src" / "models_ml.py"),
+    ("M4 趋势 + GPR", ROOT / "src" / "models_gpr.py"),
 ]
 
 
