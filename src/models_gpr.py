@@ -429,7 +429,8 @@ def run(df: pd.DataFrame, prof: pd.DataFrame, m: int = SPLIT_M) -> dict:
             f"{EOL_SEARCH_MULTIPLE}×N 内没穿越阈值——EOL 分位数此时不可比"
         )
 
-        fits[sp.cell] = {"model": model, "split": sp, "checks": chk, "dist": dist}
+        fits[sp.cell] = {"model": model, "split": sp, "checks": chk, "dist": dist,
+                         "predict": lambda md, t: predict_gpr(md, t)["mean"]}
         dists[sp.cell] = dist
 
         covers = (
@@ -441,6 +442,7 @@ def run(df: pd.DataFrame, prof: pd.DataFrame, m: int = SPLIT_M) -> dict:
                 "电池": sp.cell,
                 "模型": model["name"],
                 "M": m,
+                "测试点数": int(len(sp.test)),
                 "训练RMSE": train_met["RMSE"],
                 "训练R2": train_met["R2"],
                 "RMSE": met["RMSE"],
@@ -492,16 +494,18 @@ def variance_decomposition(df: pd.DataFrame, m: int = SPLIT_M) -> pd.DataFrame:
 
 
 def split_sensitivity(df: pd.DataFrame, prof: pd.DataFrame) -> pd.DataFrame:
-    """换切分点 M，指标与 EOL 区间怎么变（D23：误差必须带切分点）。"""
+    """换切分点 M，指标与 EOL 区间怎么变（D23：误差必须带切分点）。
+
+    **不报「R² 均值」**：R² 的分母是各自电池的测试段方差，跨电池平均没有意义
+    （D23 第三条）。第七轮审查（R8-06）发现这里原来有这一列，已删。
+    """
     rows = []
     for m in SPLIT_M_SWEEP:
         tbl = run(df, prof, m)["table"]
-        r2 = pd.to_numeric(tbl["R2"], errors="coerce")
         err = pd.to_numeric(tbl["EOL误差"], errors="coerce")
         rows.append(
             {
                 "M": m,
-                "测试R2均值": float(r2.mean()),
                 "RMSE 均值": float(tbl["RMSE"].mean()),
                 "EOL 绝对误差均值": float(err.abs().mean()) if err.notna().any() else float("nan"),
                 "EOL 90%区间宽度均值": float(

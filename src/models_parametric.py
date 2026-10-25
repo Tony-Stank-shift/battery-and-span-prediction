@@ -230,7 +230,7 @@ def run(df: pd.DataFrame, prof: pd.DataFrame, m: int = SPLIT_M) -> dict:
             met = metrics(sp.y_test, pred)
             eol = eol_fn(model, n_obs)
             ee = eol_error(eol, eol_true, n_obs)
-            fits[(sp.cell, key)] = {"model": model, "split": sp}
+            fits[(sp.cell, key)] = {"model": model, "split": sp, "predict": predictor}
 
             train_pred = predictor(model, sp.t_train)
             rows.append(
@@ -238,6 +238,7 @@ def run(df: pd.DataFrame, prof: pd.DataFrame, m: int = SPLIT_M) -> dict:
                     "电池": sp.cell,
                     "模型": model["name"],
                     "M": m,
+                    "测试点数": int(len(sp.test)),
                     "收敛": model["converged"],
                     "可辨识": "—" if "cond" not in model else f"{model['cond']:.0e}",
                     "外推单调": "—" if "monotone" not in model else model["monotone"],

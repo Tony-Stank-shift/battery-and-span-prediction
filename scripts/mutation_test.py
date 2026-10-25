@@ -342,7 +342,9 @@ def main() -> int:
 
     def missing_cell_collect(df, prof, m=models_ml.SPLIT_M):
         out = _orig_collect(df, prof, m)
-        return out[~((out["模型"] == "M3 随机森林") & (out["电池"] == "B0007"))]
+        t = out["table"]
+        keep = t[~((t["模型"] == "M3 随机森林") & (t["电池"] == "B0007"))]
+        return {**out, "table": keep}
 
     results.append(
         run_case(
@@ -353,12 +355,35 @@ def main() -> int:
         )
     )
 
+    # --- W13 变异 1b：四模型**一起**少一块电池（R8-03 抓到的真漏洞）---
+    def drop_cell_everywhere(df, prof, m=models_ml.SPLIT_M):
+        out = _orig_collect(df, prof, m)
+        t = out["table"]
+        # 只删表里的行，**不改 cells**：期望集合由 main() 从数据现取，
+        # 所以这个「对称的偷懒」必须被抓住（R8-03）
+        return {**out, "table": t[t["电池"] != "B0007"]}
+
+    results.append(
+        run_case(
+            "W13-M1b 四模型一起少一块电池（最自然的偷懒，对称所以骗过对称性检查）",
+            compare,
+            {"attr": "collect", "new": drop_cell_everywhere},
+            "电池集合与数据不一致",
+        )
+    )
+
     # --- W13 变异 2：把「—」当 0 塞进 EOL 误差（会让 M3 显示成完美）---
     _orig_states = compare.split_eol_states
 
-    def zero_filled_states(tbl):
-        out = _orig_states(tbl).copy()
-        out["EOL误差"] = out["EOL误差"].replace("—", 0)
+    def zero_filled_states(tbl, expected_cells=None):
+        import pandas as _pd
+
+        out = _orig_states(tbl, expected_cells).copy()
+        # 只把**非删失**行里的「—」填 0：这样第一道「删失不许有误差」不会先响，
+        # 命中的就是「可比数」那条断言（两个变异各打各的靶）
+        mask = (out["EOL误差"].astype(str) == "—") & (~out["真值删失"])
+        out.loc[mask, "EOL误差"] = 0
+        out["EOL误差数值"] = _pd.to_numeric(out["EOL误差"], errors="coerce")
         return out
 
     results.append(
@@ -366,7 +391,26 @@ def main() -> int:
             "W13-M2 把 EOL 的「—」当成 0（M3 会显得最准）",
             compare,
             {"attr": "split_eol_states", "new": zero_filled_states},
-            "有「—」被当成了数字",
+            "模型给不出 EOL，却带着一个误差数字",
+        )
+    )
+
+    # --- W13 变异 2b：删失只认字符串，不认 NaN（R8-05 抓到的真漏洞）---
+    def string_only_censor(tbl, expected_cells=None):
+        import pandas as _pd
+
+        out = _orig_states(tbl, expected_cells).copy()
+        out["真值删失"] = out["EOL真值"].astype(str) == "删失"
+        out.loc[out["真值删失"], "EOL误差"] = 3.0
+        out["EOL误差数值"] = _pd.to_numeric(out["EOL误差"], errors="coerce")
+        return out
+
+    results.append(
+        run_case(
+            "W13-M2b 删失只按字符串判断（真值编码成 NaN 时会静默变成可比）",
+            compare,
+            {"attr": "split_eol_states", "new": string_only_censor},
+            "有删失电池被算进了 EOL 误差",
         )
     )
 

@@ -54,7 +54,7 @@ python src/models_ml.py          # M3 随机森林：外推失效（fig07/fig08�
 python src/models_gpr.py         # M4 趋势 + GPR：EOL 后验分布（fig09/fig10）
 python src/compare.py            # 四模型对比主表（fig12 + 长表 CSV）
 
-python scripts/mutation_test.py  # 只查「断言是不是空的」：23 个注入错误必须全部被抓
+python scripts/mutation_test.py  # 只查「断言是不是空的」：25 个注入错误必须全部被抓
 python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/单点/空表…）不许静默给错答案
 ```
 
@@ -108,7 +108,7 @@ src/          已建：config / load_data / sanity_check / preprocess / figures 
               models_gpr / compare
               计划中：uncertainty（三层不确定性折算）/ 图表统一（W19）
 scripts/      run_all.py 一键重跑（当前 12 步，W20 扩展为完整管线）；
-              mutation_test.py 变异测试（23 条）；adversarial_test.py 病态输入测试（43 条）
+              mutation_test.py 变异测试（25 条）；adversarial_test.py 病态输入测试（43 条）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
               figures/fig01–fig12；tables/data_cleaning_decisions.md, individual_differences.md,
               regeneration_events.md, eol_threshold_sensitivity.md, eol_breakpoints.csv,

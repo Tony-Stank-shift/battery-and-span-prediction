@@ -261,12 +261,14 @@ def run(df: pd.DataFrame, prof: pd.DataFrame, m: int = SPLIT_M) -> dict:
                 "备注必须标明这是查表而不是预测"
             )
 
-        fits[sp.cell] = {"model": model, "split": sp, "probe": probe}
+        fits[sp.cell] = {"model": model, "split": sp, "probe": probe,
+                         "predict": predict_rf}
         rows.append(
             {
                 "电池": sp.cell,
                 "模型": model["name"],
                 "M": m,
+                "测试点数": int(len(sp.test)),
                 "训练RMSE": train_met["RMSE"],
                 "训练R2": train_met["R2"],
                 "RMSE": met["RMSE"],
@@ -297,14 +299,16 @@ def tree_count_sweep(df: pd.DataFrame, m: int = SPLIT_M) -> pd.DataFrame:
             met = metrics(sp.y_test, predict_rf(model, sp.t_test))
             r2.append(met["R2"])
             consts[sp.cell] = extrapolation_probe(model, sp.t_test)["extrap_constant"]
-        rows.append({"树数": n, "测试R2均值": float(np.mean(r2)),
-                     "测试R2最大": float(np.max(r2)), **consts})
+        rows.append({"树数": n, "测试R2（逐块最小）": float(np.min(r2)),
+                     "测试R2（逐块最大）": float(np.max(r2)), **consts})
     out = pd.DataFrame(rows)
     base = out.loc[out["树数"] == N_TREES, list(split_by_battery(df).keys())].to_numpy(float)
     out["常数与主配置最大差"] = np.abs(
         out[list(split_by_battery(df).keys())].to_numpy(float) - base
     ).max(axis=1)
-    assert (out["测试R2最大"] < 0).all(), "树数扫描里出现了非负的测试 R² —— 主表结论不成立"
+    assert (out["测试R2（逐块最大）"] < 0).all(), (
+        "树数扫描里出现了非负的测试 R² —— 主表结论不成立"
+    )
     return out
 
 
@@ -472,8 +476,7 @@ def split_sensitivity(df: pd.DataFrame, prof: pd.DataFrame) -> pd.DataFrame:
         rows.append(
             {
                 "M": m,
-                "测试R2均值": float(r2.mean()),
-                "测试R2最大": float(r2.max()),
+                "测试R2（逐块最小）": float(r2.min()),
                 "外推常数区间": f"{consts.min():.3f}–{consts.max():.3f} Ah",
                 "EOL预测": "、".join("—" if v == "—" else str(v) for v in eol),
                 "查表电池": "、".join(lookup) or "无",
