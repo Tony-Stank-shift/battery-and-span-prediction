@@ -187,15 +187,19 @@ def self_test(series: dict[str, pd.DataFrame]) -> None:
     m = metrics(y, y.copy())
     assert m["RMSE"] == 0.0 and m["MAE"] == 0.0 and m["R2"] == 1.0, m
 
-    # 整体偏移 0.1 → RMSE = MAE = 0.1，MAPE = 0.1/mean(y)
+    # 整体偏移 0.1 → RMSE = MAE = 0.1，MAPE 是 mean(|0.1/y_i|)，**不是** 0.1/mean(y)
     m = metrics(y, y + 0.1)
     assert abs(m["RMSE"] - 0.1) < 1e-12 and abs(m["MAE"] - 0.1) < 1e-12, m
-    assert abs(m["MAPE"] - 0.1 / y.mean() * 100) < 1e-9, m
+    assert abs(m["MAPE"] - 0.1 * np.mean(1.0 / y) * 100) < 1e-9, m
 
-    # 预测成常数（树模型外推的典型行为）→ R² 必为负
+    # 预测成「测试段均值」的常数 → R² 恰为 0（不是负的；负值要预测成别的常数）
     flat = np.full_like(y, y.mean())
     m = metrics(y, flat)
-    assert m["R2"] < 0, f"常数预测的 R² 竟然非负：{m}"
+    assert abs(m["R2"]) < 1e-12, f"均值常数预测的 R² 应为 0，实际 {m}"
+    # 偏掉的常数 → R² 必为负。树模型外推时就是把趋势压成一条水平线，
+    # 如果那条线落在测试段均值之外，R² 会是负数（本项目 M3 的核心现象）。
+    m = metrics(y, np.full_like(y, y.mean() + 0.2))
+    assert m["R2"] < 0, f"偏移常数预测的 R² 竟然非负：{m}"
 
     # 发散必须报错，不能悄悄返回一个「误差」
     try:
