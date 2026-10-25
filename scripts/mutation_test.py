@@ -3,8 +3,8 @@
 一个从不失败的断言等于没有断言。做法是手工注入已知错误，
 看对应的断言是否**按预期炸掉**。每次注入都必须让管线以非零退出码结束。
 
-当前 **20 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + W12 两条 +
-一条回归用例（W8-R1）。
+当前 **23 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + W12 两条 +
+W13 三条 + 一条回归用例（W8-R1）。
 
 它真的抓到过东西（不只是验证代码）：
 1. 最初我给 W8 写的变异是「把 trailing 滚动窗口换成居中窗口」，预期泄漏检测会炸——
@@ -16,7 +16,7 @@
 
 用法
 ----
-    python scripts/mutation_test.py      # 20/20 通过才说明这些断言不是空的
+    python scripts/mutation_test.py      # 23/23 通过才说明这些断言不是空的
 """
 
 from __future__ import annotations
@@ -61,6 +61,7 @@ def main() -> int:
     import sensitivity
     import features
     import evaluate
+    import compare
     import models_ml
     import models_parametric
     import models_gpr
@@ -335,6 +336,54 @@ def main() -> int:
         )
     )
 
+
+    # --- W13 变异 1：某个模型的表少一块电池（"只比能比的"这种偷懒）---
+    _orig_collect = compare.collect
+
+    def missing_cell_collect(df, prof, m=models_ml.SPLIT_M):
+        out = _orig_collect(df, prof, m)
+        return out[~((out["模型"] == "M3 随机森林") & (out["电池"] == "B0007"))]
+
+    results.append(
+        run_case(
+            "W13-M1 某个模型少一块电池（在比不同的电池）",
+            compare,
+            {"attr": "collect", "new": missing_cell_collect},
+            "有模型的行数不等于电池数",
+        )
+    )
+
+    # --- W13 变异 2：把「—」当 0 塞进 EOL 误差（会让 M3 显示成完美）---
+    _orig_states = compare.split_eol_states
+
+    def zero_filled_states(tbl):
+        out = _orig_states(tbl).copy()
+        out["EOL误差"] = out["EOL误差"].replace("—", 0)
+        return out
+
+    results.append(
+        run_case(
+            "W13-M2 把 EOL 的「—」当成 0（M3 会显得最准）",
+            compare,
+            {"attr": "split_eol_states", "new": zero_filled_states},
+            "有「—」被当成了数字",
+        )
+    )
+
+    # --- W13 变异 3：合并时覆盖模型身份列（R7-6 那个 bug 的回归）---
+    _orig_to_common = compare.to_common_schema
+
+    def collapsed_schema(tbl, model_name=None):
+        return _orig_to_common(tbl).assign(模型="M_all")
+
+    results.append(
+        run_case(
+            "W13-M3 合并时把四个模型压成一个标签",
+            compare,
+            {"attr": "to_common_schema", "new": collapsed_schema},
+            "模型集合不对",
+        )
+    )
 
     # --- W12 变异 1：LOBOCV 的折里混进被留出的个体（数据泄漏的典型形态）---
     def overlapping_folds(labels):
