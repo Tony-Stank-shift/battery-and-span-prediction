@@ -237,7 +237,7 @@ def lobocv_one_feature(
                 "斜率": b,
                 "训练点数": len(train),
                 "训练x跨度": float(np.ptp(feat.loc[train, feature].to_numpy(float))),
-                "x外推距离": float(
+                "到最近训练点的距离": float(
                     min(abs(float(feat.loc[hold, feature]) - float(feat.loc[c, feature]))
                         for c in train)
                 ),
@@ -308,20 +308,34 @@ COMMON_COLUMNS: tuple[str, ...] = (
 """
 
 
-def to_common_schema(model_name: str, tbl: pd.DataFrame) -> pd.DataFrame:
+def to_common_schema(tbl: pd.DataFrame, model_name: str | None = None) -> pd.DataFrame:
     """把某个模型的输出表规范成统一列序：公共列在前，模型特有列在后。
 
     缺任何一列都直接报错——**不许静默补 NaN**。
+
+    `model_name` 的语义（第七轮审查 R7-6 抓出来的坑）：
+    - **传了**：要求表里只有一个模型、且与它一致，然后写进「模型」列。
+      若表里有多个模型（M1/M2 共用一张 8 行的表），直接报错而不是把 M2 的行
+      静默改标成 M1。
+    - **不传**：保留原「模型」列——多模型表要靠这一列区分身份。
     """
     missing = [c for c in COMMON_COLUMNS if c not in tbl.columns]
     if missing:
         raise ValueError(
-            f"{model_name} 的表缺少公共列 {missing}；"
-            f"现有列：{list(tbl.columns)}"
+            f"表缺少公共列 {missing}；现有列：{list(tbl.columns)}"
         )
     extra = [c for c in tbl.columns if c not in COMMON_COLUMNS]
     out = tbl.loc[:, list(COMMON_COLUMNS) + extra].copy()
-    out["模型"] = model_name
+
+    if model_name is not None:
+        uniq = out["模型"].unique().tolist()
+        if len(uniq) > 1:
+            raise ValueError(
+                f"表里有多个模型 {uniq}，不能统一标成 {model_name}——先按模型拆表再调用"
+            )
+        if uniq[0] != model_name:
+            raise ValueError(f"表内模型是 {uniq[0]}，与传入的 {model_name} 不一致")
+        out["模型"] = model_name
     return out
 
 
@@ -362,24 +376,38 @@ def self_test_framework() -> None:
     assert coverage([1, 2, 3], [0, 1, 2], [2, 3, 4]) == 1.0
     assert coverage([1, 5], [0, 0], [2, 2]) == 0.5
     assert abs(mpiw([0, 0], [2, 4]) - 3.0) < 1e-12
-    try:
-        coverage([1], [3], [2])
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("上界小于下界时 coverage 没有报错")
+    for fn, args in ((coverage, ([1], [3], [2])), (mpiw, ([3], [2]))):
+        try:
+            fn(*args)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"{fn.__name__} 在上界小于下界时没有报错")
 
-    # 统一表：缺列必须报错，不许静默补 NaN
-    good = pd.DataFrame({c: [1] for c in COMMON_COLUMNS})
-    out = to_common_schema("X", good)
-    assert out["模型"].iloc[0] == "X"
+    # 统一表：缺列必须报错；多模型表不许被静默合并成一个标签（R7-6）
+    # 顺序有意：先查「缺列」，再查「多模型」，这样两个变异各自命中自己那条断言
+    good = pd.DataFrame({c: [1] for c in COMMON_COLUMNS}).assign(模型="M1")
+    out = to_common_schema(good, "M1")
+    assert out["模型"].iloc[0] == "M1"
+    assert to_common_schema(good)["模型"].iloc[0] == "M1", (
+        "不传 model_name 时应保留原「模型」列"
+    )
     bad = good.drop(columns=["EOL误差"])
     try:
-        to_common_schema("X", bad)
+        to_common_schema(bad, "M1")
     except ValueError as exc:
         assert "EOL误差" in str(exc), exc
     else:
         raise AssertionError("缺 EOL误差 列时 to_common_schema 没有报错")
+    multi = pd.concat([good, good.assign(模型="M2")], ignore_index=True)
+    keep = to_common_schema(multi)
+    assert set(keep["模型"]) == {"M1", "M2"}, "多模型表被压成了一个标签"
+    try:
+        to_common_schema(multi, "M1")
+    except ValueError as exc:
+        assert "多个模型" in str(exc), exc
+    else:
+        raise AssertionError("多模型表传了 model_name 却没报错")
 
 
 # ---------------------------------------------------------------------------
@@ -635,14 +663,21 @@ def render_task_b_md(
     labels, censored, long, summary, null_mae, best_feat, best_mae, worst,
     fig_path, feat,
 ) -> str:
+    """把结论写成报告。数字现算；K / 特征数 / 删失电池一概不写死。"""
+    import features
+
     feat_summary = summary[summary["特征"] != "零基准（训练均值）"]
     n = len(labels)
     folds = lobocv_folds(labels)
     n_train = len(folds[0][0])
     worst_err = float(worst["误差"])
     worst_span = float(worst["训练x跨度"])
-    worst_extra = float(worst["x外推距离"])
+    worst_gap = float(worst["到最近训练点的距离"])
+    n_feat = len(feat_summary)
+    k_main = features.K_MAIN
     slope_max = float(feat_summary["平均斜率"].abs().max())
+    # 斜率放大系数：1/训练x跨度（设计矩阵条件数的主因）
+    amp = 1.0 / worst_span if worst_span > 0 else float("nan")
 
     return "\n".join(
         [
@@ -656,8 +691,10 @@ def render_task_b_md(
             "**逐个体拟合，没有「留一个体」这回事**。",
             "- **任务 B**（本文件）：只看前 K 个循环的**特征**，预测**这块电池的寿命**。"
             "样本单位是**个体**，所以这里才用 LOBOCV（留一电池交叉验证）。",
-            "- `cycle` 在任务 B 里**不是**特征（会泄露），10 个特征全部来自 1..K 的窗口内信息。",
+            "- `cycle` 在任务 B 里**不是**特征（会泄露），"
+            f"{n_feat} 个特征全部来自 1..K 的窗口内信息。",
             "",
+            f"- 观测窗口 **K = {k_main}**（`features.K_MAIN`）；这张表每个数都依赖它。",
             f"- 有寿命标签的个体：**n = {n}**；删失（无标签）的：{'、'.join(censored) or '无'}。",
             f"- 折数 = {len(folds)}，**每折训练样本 = {n_train}**。",
             "",
@@ -669,12 +706,13 @@ def render_task_b_md(
             f"**{null_mae:.1f}** 循环；最好的单特征模型（{best_feat}）是 **{best_mae:.1f}**，"
             f"全部 {len(feat_summary)} 个特征都更差。",
             "",
-            "这不是「特征没用」——**这是 n=3 时任何交叉验证都无法回答的问题**。"
+            "这不是「特征没用」——**这是 n 太小时任何交叉验证都无法回答的问题**"
+            f"（本数据 n = {n}）。"
             f"每折只有 {n_train} 个训练点，一个 2 参数的线性模型刚好用 2 个点解出 2 个参数，"
             "训练误差**恒等于 0**（`linear_2pt` 里有断言：这是恒等式，不是拟合得好）。"
             "于是「模型在训练集上完美」在这里没有任何信息量，剩下全是外推运气。",
             "",
-            "## 三、最坏的那一折：2 个点 + 近共线的 x = 失控",
+            "## 三、最坏的那一折：2 个点 + 跨度极小的 x = 失控",
             "",
             f"最坏一行：用 {worst['特征']} 预测 **{worst['留出']}**，"
             f"预测 {worst['预测']:.0f} 循环、真值 {worst['真值']:.0f}，"
@@ -682,32 +720,35 @@ def render_task_b_md(
             "",
             f"- 训练集两个点的 x 只差 **{worst_span:.4f}**"
             f"（这 2 个点的寿命却差 {abs(float(np.diff(labels.loc[[c for c in labels.index if c != worst['留出']]].to_numpy(float))[0])):.0f} 循环）；",
-            f"- 斜率因此达到 **{worst['斜率']:.1f} 循环/单位特征**"
+            f"- 斜率的放大系数是 **1/{worst_span:.4f} ≈ {amp:.0f}**，"
+            f"于是斜率被放大到 **{worst['斜率']:.1f} 循环/单位特征**"
             f"（该特征三折的平均斜率是 {float(feat_summary.loc[feat_summary['特征'] == worst['特征'], '平均斜率'].iloc[0]):.1f}）；",
-            f"- 被留出的那个个体 x 又落在训练区间外 **{worst_extra:.4f}**，"
-            "直线一外推就飞了。",
+            f"- 被留出的那个个体到最近训练点的距离是 **{worst_gap:.4f}**，"
+            "乘上被放大的斜率，直线一外推就飞了。",
             "",
-            "这条与 W9 的 M2 是同一个病：**近共线的自变量 + 小样本 = 斜率不可辨识**。"
-            "W9 里那叫「参数不可辨识」，这里叫「外推爆炸」，本质一样。",
+            "**这不是「近共线」**——这里只有一个自变量，谈不上共线。准确说法是："
+            "**斜率是唯一确定的（可辨识），但它的方差被 1/Δx 放大**，属于「唯一解但极不稳」。"
+            "W9 的 M2 是另一种病：那条脊上有无穷多组参数给出同样的拟合（多解）。"
+            "两者都让寿命数字不可信，但机制不同，报告里不能混成一句「本质一样」。",
             "",
             f"![LOBOCV](../figures/{fig_path.name})",
             "",
             "## 四、指标框架：这一轮新增了什么",
             "",
-            "| 组件 | 作用 | 自检 |",
+            "| 组件 | 作用 | 谁在守门 |",
             "|---|---|---|",
-            "| `lobocv_folds` | 留一个体的折生成，断言每个体恰好留出一次 | 折覆盖 / 训练集不含留出者 |",
-            "| `linear_2pt` | 两点线性拟合，**显式断言训练残差恒为 0** | 恒等式被写成断言 |",
-            "| `lobocv_null` | 零基准（训练均值）——任何模型必须先赢它 | 预测值等于训练均值 |",
-            "| `coverage` / `mpiw` | PICP 覆盖率与平均区间宽度（W17 用） | 全覆盖 / 半覆盖 / 上界下界颠倒报错 |",
-            "| `to_common_schema` | 四个模型的表合并成统一列序 | **缺列直接报错，不许静默补 NaN** |",
+            "| `lobocv_folds` | 留一个体的折生成 | 只挡 n<3；折的正确性由 `self_test_framework` 守 |",
+            "| `linear_2pt` | 两点线性拟合，**显式断言训练残差恒为 0** | 函数内断言（写反斜率会炸） |",
+            "| `lobocv_null` | 零基准（训练均值）——任何模型必须先赢它 | `self_test_framework` 查预测值 |",
+            "| `coverage` / `mpiw` | PICP 覆盖率与平均区间宽度（W17 用） | `self_test_framework` 查全覆盖/半覆盖/边界报错 |",
+            "| `to_common_schema` | 模型表合并成统一列序 | **缺列报错；多模型表不许被压成一个标签** |",
             "",
             "## 五、结论：任务 B 在这份数据上只能描述",
             "",
             f"1. **不给排名**：n={n}、每折训练 {n_train} 个样本，任何排序都是噪声。"
             "报告里引用「哪个特征最好」时，必须同时给 n。",
-            "2. **不给 p 值当结论**：n=3 时相关系数的可视化区间是 [−1, 1]，"
-            "W8 已经记过这件事（10 个特征 p 全 > 0.20）。",
+            "2. **不给 p 值当结论**：n 这么小的时候相关系数的区间几乎覆盖 [−1, 1]，"
+            f"W8 已经记过这件事（{n_feat} 个特征的 p 全部 > 0.20）。",
             "3. **可以说的是方向**：特征与寿命的**符号**在 W8 里做过描述性记录，"
             "那只能当假设，等更多电池数据才能验证。",
             "4. **任务 A 的结论不受影响**：M1–M4 是逐个体拟合，不依赖跨个体的样本量。",
@@ -715,9 +756,9 @@ def render_task_b_md(
             "## 六、这张表不能怎么读",
             "",
             "1. **不能把「零基准最好」读成「机器学习没用」**：它读成的是"
-            "「本数据只有 3 个有标签的个体，不够做跨个体学习」。",
+            f"「本数据只有 {n} 个有标签的个体，不够做跨个体学习」。",
             "2. **不能拿训练误差证明模型好**：两点拟合的训练误差恒为 0（第三节）。",
-            "3. **不能把 LOBOCV 的误差当置信区间**：3 个数的均值没有方差可言，"
+            f"3. **不能把 LOBOCV 的误差当置信区间**：{n} 个数的均值没有方差可言，"
             "任何 `mean ± std` 在这里都不成立。",
             "",
         ]

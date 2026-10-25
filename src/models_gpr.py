@@ -2,17 +2,20 @@
 
 一句话结论（先给，后面全是证据）
 --------------------------------
-M4 的价值**不在点预测，在分布**。实测：残差 GP 学到的长度尺度只有
-0.9–4.3 个循环（远小于 80 个观测循环），所以一旦离开数据区间，
-GP 的后验均值**精确回到 0**、后验标准差**立刻饱和成常数**。
+M4 的价值**不在点预测，在分布**。实测：残差 GP 学到的长度尺度只有几个到二十几个循环
+（具体数值由 `model_gpr.md` 现算给出），远小于观测长度 80 与外推距离——所以一旦离开
+数据区间足够远，GP 的后验均值**回到 0**、后验标准差**饱和成常数**。
 也就是说：**平稳核的 GPR 没有能力外推趋势**——外推这件事必须由趋势项承担，
 GP 只负责「残差的形状 + 观测噪声」。这条不是本项目的发现，是平稳过程的本性，
 但它是 M4 能不能讲清楚的前提，所以写在最前面。
 
+（注意：本模块的数是**数据相关**的，报告里的区间一律由代码现算，
+不许写进注释或文档字符串——第七轮审查就是靠这一条抓出两个过期数字。）
+
 因此 M4 的结构被拆成两层方差（这也正好接上 W14 的「三层不确定性」）：
     cap(t) = 趋势(t)  +  残差 GP(t)
     Var   = 趋势参数方差(OLS)  ⊕  残差方差(GP)
-第一层随外推距离像漏斗一样张开（∝ (t−t̄)²），第二层是常数。
+第一层随外推距离像漏斗一样张开（∝ (t−t̄)²），第二层在观测末端之外是常数。
 只留第二层的话，EOL 区间会窄得离谱——这正是 W17 要拿 PICP 检验的东西。
 
 继承来的两条纪律（D23）
@@ -173,7 +176,9 @@ def fit_gpr(t: np.ndarray, y: np.ndarray, seed: int = GP_SEED, n_restarts: int =
         "noise_std": float(np.sqrt(trend["sigma2"])),
         "lml": float(gp.log_marginal_likelihood_value_),
     }
-    # 确定性：同种子重拟合必须给出同一组超参（否则报告的数不可复现）
+    # 确定性：同种子重拟合的超参差异应在 1e-15 相对量级（第七轮审查实测：
+    # length_scale 两次 3.6183314607371444 vs 3.6183314607371413，相对差 8.9e-16）。
+    # 所以这里**不**声称 bit 级复现，只要求「同一代码路径、同一台机器上可复现」。
     assert np.isfinite(model["length_scale"]) and model["length_scale"] > 0
     return model
 
@@ -328,6 +333,12 @@ def structure_checks(model: dict, n_obs: int, m: int) -> dict:
     near = np.linspace(model["t_max"], min(tau_start, float(n_obs * EOL_SEARCH_MULTIPLE)), 200)
     max_local = float(np.max(np.abs(predict_gpr(model, near)["resid_mean"])))
 
+    # 2c. 数据之外**整段**（含近场）的 GP 标准差不是常数——必须在报告里说清楚，
+    #     否则「常数」这个词会把近场那 0.02 Ah 的变化一起吞掉（第七轮审查 R7-4）。
+    whole = predict_gpr(model, extrap)["std_gp_only"]
+    gp_std_whole_ptp = float(np.max(whole) - np.min(whole))
+    gp_std_whole_lo, gp_std_whole_hi = float(np.min(whole)), float(np.max(whole))
+
     # 3. GP 单独的标准差是常数
     gp_std = far_pred["std_gp_only"]
     gp_flat = float(np.max(np.abs(gp_std - gp_std[0])))
@@ -357,6 +368,9 @@ def structure_checks(model: dict, n_obs: int, m: int) -> dict:
         "decay_cycles": float(tau_start - model["t_max"]),
         "max_resid_outside": max_resid,
         "max_local_correction": max_local,
+        "gp_std_whole_ptp": gp_std_whole_ptp,
+        "gp_std_whole_lo": gp_std_whole_lo,
+        "gp_std_whole_hi": gp_std_whole_hi,
         "trend_share_at_5n": trend_share,
         "gp_std_flat": gp_flat,
         "gp_std_outside": float(gp_std[0]),
@@ -397,6 +411,15 @@ def run(df: pd.DataFrame, prof: pd.DataFrame, m: int = SPLIT_M) -> dict:
         eol = eol_mean(model, n_obs)
         ee = eol_error(eol, eol_true, n_obs)
 
+        # 与 M3 同款的守卫（R7 建议 4）：EOL 若落在训练区间内，那是查表不是预测。
+        # 用「备注标明」而不是「抛异常」，因为切分点敏感性扫描到 M=100 时
+        # B0018 的真实寿命 97 已被越过，这是**预期内**的情形，必须如实记下来而不是崩掉。
+        note = ee["note"]
+        if eol is not None and eol <= m:
+            note = "；".join(
+                x for x in (note, "⚠️ 穿越发生在训练区间内：这是查表，不是预测") if x
+            )
+
         dist = eol_from_paths(model, n_obs)
         assert dist["q05"] <= dist["median"] <= dist["q95"], (
             f"{sp.cell}: EOL 分位数没有排序（{dist['q05']}, {dist['median']}, {dist['q95']}）"
@@ -430,8 +453,14 @@ def run(df: pd.DataFrame, prof: pd.DataFrame, m: int = SPLIT_M) -> dict:
                 "EOL真值": "删失" if eol_true is None else eol_true,
                 "EOL误差": "—" if ee["eol_err"] is None else ee["eol_err"],
                 "区间是否覆盖真值": covers,
-                "备注": ee["note"],
+                "备注": note,
             }
+        )
+        # 真值与 M1 同款的点估计一并挂在这里（第七轮审查建议 2：
+        # 原来靠 main() 事后往 fits 里挂，直接调 run()+fig09 就会把真值全标成「删失」）
+        fits[sp.cell]["eol_true"] = eol_true
+        fits[sp.cell]["eol_m1"] = eol_linear(
+            {"params": {"a": model["trend"]["a"], "b": model["trend"]["b"]}}
         )
     return {"table": pd.DataFrame(rows), "fits": fits, "dists": dists}
 
@@ -606,6 +635,73 @@ def render_md(
     gp_flat = max(res["fits"][c]["checks"]["gp_std_flat"] for c in cells)
     gp_out_lo = min(res["fits"][c]["checks"]["gp_std_outside"] for c in cells)
     gp_out_hi = max(res["fits"][c]["checks"]["gp_std_outside"] for c in cells)
+    gp_whole_lo = min(res["fits"][c]["checks"]["gp_std_whole_lo"] for c in cells)
+    gp_whole_hi = max(res["fits"][c]["checks"]["gp_std_whole_hi"] for c in cells)
+    gp_whole_ptp = max(res["fits"][c]["checks"]["gp_std_whole_ptp"] for c in cells)
+
+    # 核的写法与学到的超参个数：从真的对象里取，不写死（R7-1）
+    first_model = res["fits"][cells[0]]["model"]
+    kernel_txt = str(first_model["gp"].kernel_)
+    n_hyp = int(len(first_model["gp"].kernel_.theta))
+
+    # 「比值最大」的那块电池：按 ratio 选，不按 ℓ 选（R7-1 的建议 1）
+    ratios = {
+        c: res["fits"][c]["checks"]["length_scale"]
+        / (len(res["fits"][c]["split"].train) + len(res["fits"][c]["split"].test) - m)
+        for c in cells
+    }
+    ratio_cell = max(ratios, key=ratios.get)
+
+    # 残差方差在「切分点」与「观测末端」之间的增长倍数（R7-3）
+    # 注意有的电池在切分点处 GP 方差≈0（那里是插值点），比值会变 nan，只统计 >0 的
+    resid_m = var.loc[var["位置"] == "切分点 M", "残差方差"].to_numpy(float)
+    resid_end = var.loc[var["位置"] == "观测末端", "残差方差"].to_numpy(float)
+    _ratio = resid_end[resid_m > 0] / resid_m[resid_m > 0]
+    resid_growth = float(_ratio.max()) if len(_ratio) else float("nan")
+
+    censored_cells = tbl.loc[tbl["EOL真值"] == "删失", "电池"].tolist()
+    eol_by_cell = "、".join(
+        f"{c} {int(tbl.loc[tbl['电池'] == c, 'EOL预测'].iloc[0])}"
+        if tbl.loc[tbl["电池"] == c, "EOL预测"].iloc[0] != "—" else f"{c} —"
+        for c in cells
+    )
+    med_by_cell = "、".join(
+        f"{c} {res['fits'][c]['dist']['median']:.0f}" for c in cells
+    )
+
+    # 「为什么偏早/偏晚」的两个决定量：切分点处的水平偏移、M 之后的实际斜率（R7-5）
+    mech_rows = []
+    for c in cells:
+        sp = res["fits"][c]["split"]
+        mod = res["fits"][c]["model"]
+        trend_at_m = float(trend_line(mod["trend"], np.array([float(m)]))[0])
+        mech_rows.append(
+            {
+                "电池": c,
+                "趋势@M − 实测@M (Ah)": trend_at_m - float(sp.y_train[-1]),
+                "拟合斜率 (Ah/循环)": mod["trend"]["b"],
+                "M 之后实际斜率": (
+                    (float(sp.y_test[-1]) - float(sp.y_test[0])) / max(len(sp.test) - 1, 1)
+                ),
+            }
+        )
+    mech = pd.DataFrame(mech_rows)
+    mech["斜率倍数"] = mech["拟合斜率 (Ah/循环)"] / mech["M 之后实际斜率"]
+    eol_err = pd.to_numeric(tbl["EOL误差"], errors="coerce")
+    mech["EOL误差"] = eol_err.to_numpy()
+    valid_mech = mech.dropna(subset=["EOL误差"])
+    if len(valid_mech) >= 2:
+        late = valid_mech.loc[valid_mech["EOL误差"].idxmax()]
+        early = valid_mech.loc[valid_mech["EOL误差"].idxmin()]
+        mech_late_cell, mech_late_level = late["电池"], float(late["趋势@M − 实测@M (Ah)"])
+        mech_early_cell, mech_early_level = early["电池"], float(early["趋势@M − 实测@M (Ah)"])
+        mech_early_slope = float(early["拟合斜率 (Ah/循环)"])
+        mech_early_real = float(early["M 之后实际斜率"])
+        mech_early_ratio = float(early["斜率倍数"])
+    else:  # pragma: no cover - 本数据不会走到
+        mech_late_cell = mech_early_cell = "—"
+        mech_late_level = mech_early_level = 0.0
+        mech_early_slope = mech_early_real = mech_early_ratio = 0.0
 
     # 趋势方差在总方差里的占比（按位置分别统计）
     var = var.assign(
@@ -644,10 +740,10 @@ def render_md(
         "",
         "## 一、口径与结构",
         "",
-        f"- **任务**：任务 A（个体内轨迹外推）。前 **M = {m}** 循环训练，预测 M+1..N。",
+        f"- **任务**：任务 A（个体内轨迹外推）。训练窗口 **M = {m}** 循环，预测 M+1..N。",
         "- **结构**：`cap(t) = 线性趋势(t) + 残差高斯过程(t)`，两层方差相加。",
-        f"- **核**：`C·RBF(ℓ) + WhiteKernel`，三个超参由边际似然学；"
-        f"`random_state={GP_SEED}`、`n_restarts_optimizer=2`。",
+        f"- **核**：`{kernel_txt}` + **固定噪声 α = σ²_OLS**（{n_hyp} 个超参由边际似然学，"
+        f"噪声不参与学习）；`random_state={GP_SEED}`、`n_restarts_optimizer=2`。",
         f"- **趋势**：OLS 直线（与 M1 同一实现），参数不确定性 `σ²(XᵀX)⁻¹` 显式传播。",
         f"- **后验采样**：{N_SAMPLES} 条路径；带宽用 95%（z={Z95:.4f}）。",
         "",
@@ -658,11 +754,11 @@ def render_md(
         "## 三、最重要的结论：**平稳核的 GPR 不会外推，它只会在数据外面「躺平」**",
         "",
         f"残差 GP 学到的长度尺度是 **{ls_lo:.2f}–{ls_hi:.2f} 个循环**，"
-        f"而观测长度是 {m}、外推距离是 "
+        f"而训练窗口是 {m}、外推距离是 "
         + f"{min(len(res['fits'][c]['split'].test) for c in cells)}–"
         + f"{max(len(res['fits'][c]['split'].test) for c in cells)} 个循环。比值最大的一块"
-        f"（{cells[int(np.argmax([res['fits'][c]['checks']['length_scale'] for c in cells]))]}）"
-        f"也只有 **{ls_ratio_hi:.2f}**——也就是说 GP 的相关尺度只是外推距离的一个零头。",
+        f"（{ratio_cell}）也只有 **{ls_ratio_hi:.2f}**——也就是说 GP 的相关尺度"
+        "只是外推距离的一个零头。",
         "",
         "**但「躺平」不是立刻发生的**，这里必须精确：",
         "",
@@ -670,8 +766,10 @@ def render_md(
         "（这是它在测试段唯一真正做的事）；",
         f"- **远场**：离开数据 {decay_lo:.0f}–{decay_hi:.0f} 个循环（= 5 倍长度尺度）之后，"
         f"GP 的后验均值降到 **{resid_out:.0e} Ah** 量级 → **点预测就是趋势线**；",
-        f"- **带宽**：数据之外 GP 单独的标准差是**常数** {gp_out_lo:.4f}–{gp_out_hi:.4f} Ah"
-        f"（随距离的变化最大 {gp_flat:.1e}）→ **它不会随着外推变宽**。",
+        f"- **带宽**：离开数据 5ℓ 之后，GP 单独的标准差才是**常数** "
+        f"{gp_out_lo:.4f}–{gp_out_hi:.4f} Ah（远场窗口内随距离的变化最大 {gp_flat:.1e}）。"
+        f"**近场不是常数**：整段 `[M, {EOL_SEARCH_MULTIPLE}N]` 上它从 "
+        f"{gp_whole_lo:.4f} 长到 {gp_whole_hi:.4f} Ah（极差最大 {gp_whole_ptp:.4f}）。",
         "",
         "这三条都由 `structure_checks()` 断言钉住。所以 M4 能不能讲清楚，"
         "关键不在 GP，而在**趋势项**：",
@@ -681,11 +779,12 @@ def render_md(
         "- 想让 GP 自己外推趋势，得换非平稳核（比如线性核叠加）或把趋势做进均值函数——"
         "本项目**故意不这么做**，因为那样「趋势不确定性」就被埋进超参里，"
         "报告里再也说不清「这条带子为什么这么宽」。",
-        "- 一个实现上的坑（第一版踩过）：把噪声交给 `WhiteKernel` 自由学，"
-        "它会把噪声学成 3.6e-9、于是 GP **逐点插值** 80 个残差"
-        "（训练 RMSE 4.8e-10、训练 R²=1.000）。那是过拟合，且会让对比表出现"
-        "「M4 训练段完美」的假象。现在噪声下限固定为 OLS 残差方差，"
-        f"训练 RMSE 回到 {tbl['训练RMSE'].min():.4f}–{tbl['训练RMSE'].max():.4f} Ah，可比。",
+        "- 一个实现上的坑（第一版踩过，配置已弃用）：把噪声完全交给 `WhiteKernel` 自由学、"
+        "`alpha` 取到 1e-12 量级时，GP 会**逐点插值**训练段（训练 R² 直接等于 1），"
+        "对比表里就会出现「M4 训练段完美」的假象。现在噪声下限固定为 OLS 残差方差，"
+        f"训练 RMSE 是 {tbl['训练RMSE'].min():.4f}–{tbl['训练RMSE'].max():.4f} Ah，可比。"
+        "（这条由变异用例 **W11-M2** 钉住：把噪声下限去掉必须被断言抓住。"
+        "旧版报告曾写「噪声被学成 3.6e-9、训练 RMSE 4.8e-10」——那两个数在弃用配置下不可复现，已删。）",
         "",
         "## 四、方差分解：越远，带宽越由趋势参数决定",
         "",
@@ -693,8 +792,9 @@ def render_md(
         "",
         f"趋势参数方差占总方差的份额：观测末端 **{end_share.min():.0%}–{end_share.max():.0%}**，"
         f"到 2N 处升到 **{far_share.min():.0%}–{far_share.max():.0%}**。"
-        "残差方差是常数（GP 单独标准差 "
-        f"{gp_out_lo:.4f}–{gp_out_hi:.4f} Ah），趋势方差 ∝ (t−t̄)²，"
+        "**观测末端之外**残差方差才是常数（GP 单独标准差 "
+        f"{gp_out_lo:.4f}–{gp_out_hi:.4f} Ah；表里「切分点 M」那一行的残差方差还很小，"
+        f"因为那里 GP 还在插值，比观测末端小 {resid_growth:.1f} 倍），趋势方差 ∝ (t−t̄)²，"
         "**所以外推越远，不确定性越由「这条直线本身估得准不准」决定**。",
         "",
         "这也是 M4 与 M1 的关系：M4 的点预测在远场就是 M1，**它多出来的东西主要是区间**。"
@@ -708,17 +808,32 @@ def render_md(
         f"- 中位数：" + "、".join(f"{c} {v:.0f}" for c, v in zip(cells, medians)),
         f"- 90% 区间宽度：" + "、".join(f"{c} {w:.0f}" for c, w in zip(cells, widths)),
         "",
+        "⚠️ 先分清两个估计量：**主表的「EOL预测」是均值曲线首次 ≤τ 的循环**"
+        f"（{eol_by_cell}）；**上面这个中位数是 {N_SAMPLES} 条后验路径各自穿越后的分位数**。"
+        "两者差 1–2 个循环，别当成矛盾，也别混着跟真值比。",
+        "",
         f"**区间覆盖真值的情况：{n_cover}/{n_cover_all} 块**"
-        f"（只有 {n_cover_all} 块有真值，B0007 删失）。"
-        f"EOL 点估计的绝对误差均值是 {err.abs().mean():.1f} 循环。",
+        f"（只有 {n_cover_all} 块有真值，{'、'.join(censored_cells) or '无'} 删失）。"
+        f"均值曲线的点估计绝对误差均值是 {err.abs().mean():.1f} 循环。",
         "",
         "⚠️ 这个 90% 区间**明显偏窄**：区间宽度只有 "
         f"{min(widths):.0f}–{max(widths):.0f} 循环，而点估计的误差就有 "
         f"{err.abs().max():.0f} 循环（{tbl.loc[err.abs().idxmax(), '电池']}）。"
         "原因不是代码错，而是**第三层不确定性没进来**："
         "M4 的区间只含「残差噪声 + 趋势参数」，"
-        "**不含「线性这条形式本身是否成立」**——"
-        "而后者才是主导（B0005/B0006 的真实衰减是加速的，直线必然偏）。",
+        "**不含「线性这条形式本身是否成立」**。",
+        "",
+        "这条形式偏差这里要说准，不能说成「衰减在加速」——项目自己的 W5 表里，"
+        "B0006 的加速比是四块里**最低**的，所以「加速」解释不了它的误差。"
+        "真正的决定量有两个：**切分点处的水平偏移** 与 **M 之后的实际斜率**。",
+        "",
+        mech.round(4).to_markdown(index=False),
+        "",
+        f"两块有真值的电池方向相反，正好说明这一点：{mech_late_cell} 的直线在切分点比实测"
+        f"**高 {abs(mech_late_level):.4f} Ah**（前期有平台，线被拉上去就回不来），水平偏移占上风 → 报晚；"
+        f"{mech_early_cell} 的水平偏移只有 {abs(mech_early_level):.4f} Ah，但拟合斜率 "
+        f"{mech_early_slope:.5f} 比 M 之后的实际斜率 {mech_early_real:.5f} 陡 "
+        f"{mech_early_ratio:.1f} 倍 → 报早。一条「加速」机制产生不了两个相反符号。",
         "",
         "这条缺口正是 W14（三层不确定性）与 W17（PICP/MPIW 校准）要填的东西，"
         "在这里先如实标出来，不许把窄区间当好消息。",
@@ -733,8 +848,9 @@ def render_md(
         "如果报告里说「GPR 提升了精度」，那是假的。",
         "2. **不能把 95% 区间当成「真值有 95% 概率落在里面」**：它只覆盖了两层不确定性，"
         "第五节的覆盖情况已经说明它会漏。",
-        "3. **不能解释长度尺度**：ℓ≈1–4 个循环意味着「残差在这尺度上相关」，"
-        "这是 80 个点的噪声结构，不是电化学时间常数。",
+        "3. **不能解释长度尺度**："
+        f"ℓ = {ls_lo:.1f}–{ls_hi:.1f} 个循环只说明「残差在这个尺度上有一点相关性」，"
+        f"这是 {m} 个点的噪声结构，不是电化学时间常数。",
         censor_note,
         "",
     ]
@@ -748,20 +864,19 @@ def main() -> int:
     prof = cell_profile(df)
 
     res = run(df, prof, SPLIT_M)
-    res["prof"] = prof
     tbl = res["table"]
     tbl_m = split_sensitivity(df, prof)
     var = variance_decomposition(df, SPLIT_M)
 
-    # 把真值挂回 fits，供 fig10 画竖线（避免图里去猜）
-    prof_idx = prof.set_index("battery_id")
-    for cell in res["fits"]:
-        e = prof_idx.loc[cell, "eol_cycle"]
-        res["fits"][cell]["eol_true"] = None if pd.isna(e) else int(e)
-        res["fits"][cell]["eol_m1"] = eol_linear(
-            {"params": {"a": res["fits"][cell]["model"]["trend"]["a"],
-                        "b": res["fits"][cell]["model"]["trend"]["b"]}}
-        )
+    # 确定性自检：同种子再拟一次，超参必须在 1e-12 相对差内一致
+    # （第七轮审查 R7-8：原来只有注释声称，没有检查；实测相对差 8.9e-16）
+    c0 = next(iter(res["fits"]))
+    sp0 = res["fits"][c0]["split"]
+    again = fit_gpr(sp0.t_train, sp0.y_train)
+    assert np.isclose(again["length_scale"],
+                      res["fits"][c0]["model"]["length_scale"], rtol=1e-12, atol=0), (
+        "同种子重拟合的长度尺度不一致——报告的数不可复现"
+    )
 
     TABLE_MD.write_text(render_md(tbl, tbl_m, var, res, SPLIT_M), encoding="utf-8")
     fig_a = fig09(df, res, SPLIT_M)

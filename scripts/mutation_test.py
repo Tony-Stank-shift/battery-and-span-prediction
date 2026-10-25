@@ -351,14 +351,15 @@ def main() -> int:
     )
 
     # --- W12 变异 2：统一表静默补 NaN，而不是报错 ---
-    def filling_schema(name, tbl):
+    def filling_schema(tbl, model_name=None):
         import numpy as np
 
         out = tbl.copy()
         for c in evaluate.COMMON_COLUMNS:
             if c not in out.columns:
                 out[c] = np.nan
-        out["模型"] = name
+        if model_name is not None:
+            out["模型"] = model_name
         return out
 
     results.append(
