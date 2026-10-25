@@ -136,6 +136,28 @@ def main() -> int:
     check("给了 60 行却要 K=50 → 必须报错（不许悄悄截断）",
           lambda: F.build_features_one(make_sub(np.linspace(1.9, 1.5, 60)), 50),
           expect_raises("ValueError"))
+    # 第四轮审查 F6：只查右端时，从左边截断（cycle 11..50 共 40 行）能静默混过，
+    # cap_first 会取到第 11 循环而表头仍写「第 1 循环」。
+    shifted = pd.DataFrame(
+        {
+            "battery_id": "X",
+            "cycle": np.arange(11, 51),
+            "capacity_Ah": np.linspace(1.9, 1.5, 40),
+        }
+    )
+    check("窗口从第 11 循环开始（左边被截断）→ 必须报错",
+          lambda: F.build_features_one(shifted, 50), expect_raises("ValueError"))
+
+    # 第四轮审查 F8：NaN **输出**也曾全链通过（泄漏检测的 equal_nan 把它判成「没变」）。
+    # 现在 build_features 末端会拦非有限值，这里用「extra 钩子注入全 NaN 列」来验证。
+    def nan_extra(full, feat):
+        out = feat.copy()
+        out["nan_col"] = np.nan
+        return out
+
+    check("extra 注入全 NaN 列 → build_features 必须报错",
+          lambda: F.build_features(F.load_raw().pipe(F.mark_rows), 50, extra=nan_extra),
+          expect_raises("ValueError"))
 
     # ------------------------------------------------------------------
     # 汇总

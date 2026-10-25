@@ -3,16 +3,19 @@
 一个从不失败的断言等于没有断言。做法是手工注入已知错误，
 看对应的断言是否**按预期炸掉**。每次注入都必须让管线以非零退出码结束。
 
+当前 **11 条**：W7 六条 + W8 四条 + 一条回归用例（W8-R1）。
+
 它真的抓到过东西（不只是验证代码）：
-最初我给 W8 写的变异是「把 trailing 滚动窗口换成居中窗口」，预期泄漏检测会炸——
-结果**没炸**。顺着这条追下去才发现：错的是我的叙述，不是检测。
-每块电池只算一个 t=K 的特征向量、输入先截断到 cycle ≤ K，
-所以居中窗口在截断后的数据上根本越不过 K，「居中窗口就是泄漏」是我把
-面板式特征的规则搬错了地方。变异已换成「先算后截断」（真泄漏），检测随即炸掉。
+1. 最初我给 W8 写的变异是「把 trailing 滚动窗口换成居中窗口」，预期泄漏检测会炸——
+   **没炸**。追下去才发现：错的是我的叙述，不是检测（每块电池只算一个 t=K 的特征、
+   输入先截断到 cycle ≤ K，居中窗口越不过 K）。该结论现在固化成 W8-R1：
+   判据不是「炸」，而是「**不炸 且 数值确实不同**」——它本来就是口径问题，不是泄漏。
+2. 第四轮独立审查用「往特征里塞全表行数」这种**元数据**变异，绕过了当时只扰动能量的
+   泄漏检测，并把 168 写进了 md。补上删行臂后，W8-M3 现在会被删行臂抓到。
 
 用法
 ----
-    python scripts/mutation_test.py      # 5/5 通过才说明断言不是空的
+    python scripts/mutation_test.py      # 11/11 通过才说明这些断言不是空的
 """
 
 from __future__ import annotations
@@ -116,10 +119,10 @@ def main() -> int:
     # --- W8 变异 4：去掉「先截断再算」这个顺序（真·泄漏）---
     # 注意：把 trailing 换成 center=True **不是**泄漏（截断后居中窗口最多用到第 K 行）。
     # 真正的泄漏是「在完整数据上算特征、再去取结果」，所以这里直接打掉截断。
-    def leaky_build(df, K):
+    def leaky_build(df, K, extra=None):
         import numpy as np
 
-        out = _orig_build(df, K)
+        out = _orig_build(df, K, extra=extra)
         for i, cell in enumerate(out["电池"]):
             sub = df[df["battery_id"] == cell].sort_values("cycle")
             # 用**整条轨迹**的尾部滚动残差（含 t>K 的行）覆盖掉因果版本
@@ -130,18 +133,18 @@ def main() -> int:
 
     results.append(
         run_case(
-            "W8-M1 特征改用整条轨迹算（先算后截断，真泄漏）",
+            "W8-M1 残差特征改用整条轨迹算（含 t>K 的行）",
             features,
             {"attr": "build_features", "new": leaky_build},
-            "未来信息泄漏",
+            "容量值",
         )
     )
 
     # --- W8 变异 5：把整轨迹最小容量混进特征（老坑重演）---
-    def leaky_build2(df, K):
+    def leaky_build2(df, K, extra=None):
         import numpy as np
 
-        out = _orig_build(df, K)
+        out = _orig_build(df, K, extra=extra)
         mins = df.groupby("battery_id")["capacity_Ah"].min()
         out["cap_min_full"] = out["电池"].map(mins).to_numpy(float)
         return out
@@ -151,7 +154,7 @@ def main() -> int:
             "W8-M2 特征里混入整轨迹最小容量",
             features,
             {"attr": "build_features", "new": leaky_build2},
-            "未来信息泄漏",
+            "容量值",
         )
     )
 
@@ -206,20 +209,73 @@ def main() -> int:
         )
     )
 
-    # --- W8 变异 3：特征里混进被禁列名（cycle）→ 白名单断言必须发现 ---
-    def forbidden_col_build(df, K):
-        out = _orig_build(df, K)
+    # --- W8 变异 3：特征里混进「未来行数」这种元数据 ---
+    # 这条最关键：它对**容量扰动完全无感**，只有删行臂能抓到。
+    # 第四轮审查正是用这个形状的变异绕过了初版检测并把 168 写进了 md。
+    def metadata_leak_build(df, K, extra=None):
+        out = _orig_build(df, K, extra=extra)
+        out["obs_len"] = df.groupby("battery_id").size().reindex(out["电池"]).to_numpy(float)
+        return out
+
+    results.append(
+        run_case(
+            "W8-M3 特征里混进「全表行数」元数据（只有删行臂能抓）",
+            features,
+            {"attr": "build_features", "new": metadata_leak_build},
+            "行/元数据",
+        )
+    )
+
+    # --- W8 变异 4：特征里混进被禁列名（cycle）---
+    def forbidden_col_build(df, K, extra=None):
+        out = _orig_build(df, K, extra=extra)
         out["cycle"] = df.groupby("battery_id")["cycle"].max().reindex(out["电池"]).to_numpy()
         return out
 
     results.append(
         run_case(
-            "W8-M3 特征里混进 FEATURE_EXCLUDE 里的 cycle",
+            "W8-M4 特征里混进 FEATURE_EXCLUDE 里的 cycle",
             features,
             {"attr": "build_features", "new": forbidden_col_build},
-            "被禁止作特征的列",
+            "行/元数据",
         )
     )
+
+    # --- W8 回归用例：center=True 在「先截断」下**不**泄漏（应通过泄漏检测，但值确实变了）---
+    # 审查 F9 指出历史叙述里这条只有注释、没有可复现的变异。这里固化成用例：
+    # 判据不是「炸掉」，而是「不炸 且 数值不同」——正好说明它是口径问题、不是泄漏问题。
+    def centered_resid(sub, window=features.TREND_WINDOW):
+        import numpy as np
+        import pandas as pd
+
+        y = pd.Series(sub["capacity_Ah"].to_numpy(float))
+        resid = (y - y.rolling(window, min_periods=3, center=True).median()).to_numpy()
+        cyc = sub["cycle"].to_numpy(int)
+        core = resid[cyc > window]
+        return float(np.nanstd(core))
+
+    saved = features._trailing_residual_std
+    try:
+        features._trailing_residual_std = centered_resid
+        try:
+            features.leakage_test(features.load_raw().pipe(features.mark_rows), features.K_MAIN)
+            passed = True
+        except AssertionError:
+            passed = False
+        import numpy as np
+        df_ = features.load_raw().pipe(features.mark_rows)
+        head = features.split_by_battery(df_)["B0005"]
+        head = head[head["cycle"] <= features.K_MAIN]
+        v_center = centered_resid(head)
+        v_trail = saved(head)
+        differ = not np.isclose(v_center, v_trail, rtol=0, atol=0)
+    finally:
+        features._trailing_residual_std = saved
+    results.append(bool(passed and differ))
+    print(f"[{'PASS' if passed and differ else 'FAIL'}] "
+          "W8-R1 center=True 不泄漏、但值确实不同（口径问题，非泄漏）")
+    print(f"        泄漏检测通过={passed}，数值不同={differ}"
+          f"（居中 {v_center:.8f} / 尾部 {v_trail:.8f}）")
 
     print()
     n_ok = sum(results)

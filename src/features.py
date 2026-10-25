@@ -149,13 +149,16 @@ def _trailing_residual_std(sub: pd.DataFrame, window: int = TREND_WINDOW) -> flo
 def build_features_one(sub: pd.DataFrame, K: int) -> dict[str, float]:
     """单块电池的前 K 循环特征。**调用方保证传入的 sub 已截断到 cycle ≤ K。**"""
     sub = sub.sort_values("cycle").reset_index(drop=True)
-    # 必须**恰好**覆盖到第 K 循环：少了 → 算出来的其实是「K' < K 的特征」，
-    # 但函数名和表头都写着 K，下游没法察觉（对抗输入测试抓到的第三类静默错误；
-    # 实测只给 30 行、K=50 时它会照常返回一组数）。
-    if int(sub["cycle"].max()) != K:
+    # 窗口必须是**完整且从严**的 1..K，两头都要卡（第四轮审查 F6）：
+    # - 右端不足 K：算出来的其实是 K' < K 的特征；
+    # - 左端不是 1（比如给了 cycle 11..50 共 40 行）：`cap_first` 会取到第 11 循环，
+    #   `drop_ratio_to_K` 也不再是「首循环到第 K 循环」的衰减——而表头照样写着「第 1 循环」。
+    # 初版只查了右端，左端截断能静默混过。
+    cyc = sub["cycle"].to_numpy(int)
+    if not np.array_equal(cyc, np.arange(1, K + 1)):
         raise ValueError(
-            f"特征窗口要求覆盖到第 {K} 循环，实际最大循环是 "
-            f"{int(sub['cycle'].max())}——算出来的不是 K={K} 的特征"
+            f"特征窗口必须是完整的 1..{K}，实际是 {int(cyc.min())}..{int(cyc.max())}"
+            f"（共 {len(sub)} 行）——否则算出来的不是 K={K} 的特征"
         )
     cap = sub["capacity_Ah"].to_numpy(float)
     # 非有限值必须直接报错：`np.polyfit` 遇 NaN 会静默返回 NaN，
@@ -212,14 +215,35 @@ AVAILABILITY: dict[str, str] = {
     "slope_tail20_Ah_per_100": "用 K−19..K",
     "linear_r2_to_K": "用 1..K 全部行",
     "curvature_to_K": "用 1..K 全部行",
-    "resid_std_trailing": "用 1..K 全部行，但滚动中位数**只看过去**（center=False）",
-    "n_regen_to_K": "用 1..K 的差分",
-    "max_regen_to_K": "用 1..K 的差分",
+    "resid_std_trailing": (
+        f"用 2..K 作滚动历史，取第 {TREND_WINDOW + 1}..K 循环的残差（第 1 循环从不参与："
+        "尾部窗口在它那里没有任何历史）"
+    ),
+    "n_regen_to_K": f"用 1..K 的差分（第 1 循环没有差分，天然不参与）",
+    "max_regen_to_K": "用 1..K 的差分（同上，第 1 循环不参与）",
 }
 
+SCHEMA: tuple[str, ...] = tuple(FEATURE_DOC)
+"""特征的顺序与名字的唯一出处。
 
-def build_features(df: pd.DataFrame, K: int) -> pd.DataFrame:
-    """四块电池各自的前 K 循环特征。"""
+加这条是为了让「特征集被人悄悄改掉」变成硬错误：
+`build_features_one` 返回的 key 序列必须与它**逐项相等**。
+没有它的时候，往特征里塞一列（或改名）不会有任何断言响。
+"""
+
+
+def build_features(
+    df: pd.DataFrame,
+    K: int,
+    extra=None,
+) -> pd.DataFrame:
+    """四块电池各自的前 K 循环特征。
+
+    参数 `extra` 只给泄漏检测用：一个 `(full_df, feat_df) -> feat_df` 的回调，
+    在**同一条管线末端**追加列。它的存在是为了让负控制走**真正的特征管线**
+    （第四轮审查 F5：初版负控制绕过了 `build_features`，于是它只证明了
+    「比较器有分辨力」，证明不了「管线里的泄漏检测有分辨力」）。
+    """
     rows = []
     for cell, sub in split_by_battery(df).items():
         head = sub[sub["cycle"] <= K]
@@ -227,7 +251,17 @@ def build_features(df: pd.DataFrame, K: int) -> pd.DataFrame:
             raise ValueError(f"{cell} 只有 {len(head)} 个循环，不足 K={K}")
         feats = build_features_one(head, K)
         rows.append({"电池": cell, **feats})
-    return pd.DataFrame(rows)
+    out = pd.DataFrame(rows)
+    if extra is not None:
+        out = extra(df, out)
+    # 输出必须是有限值：NaN 特征会让下游的分支静默走错
+    # （`k_sensitivity` 的符号集合会跳过 NaN→空集→标「稳定」；
+    #  泄漏检测若用 equal_nan=True 会把 NaN==NaN 判成「没变化」）。
+    vals = out.drop(columns=["电池"]).to_numpy(float)
+    if not np.all(np.isfinite(vals)):
+        bad = int((~np.isfinite(vals)).sum())
+        raise ValueError(f"特征输出里有 {bad} 个非有限值，下游会把它们当有效数字用")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -256,22 +290,36 @@ def _perturb_future(df: pd.DataFrame, K: int, seed: int) -> pd.DataFrame:
     return mark_rows(out)
 
 
-def _leaky_control(df: pd.DataFrame, K: int) -> pd.DataFrame:
-    """**故意泄漏**的对照特征：整条轨迹的最小容量与首次到达 EOL 的循环。
+def _leaky_control(df: pd.DataFrame) -> pd.DataFrame:
+    """**故意泄漏**的对照特征，三条，分别对应三种不同的泄漏通道。
 
-    它们用到了 t>K 的行（甚至用到整条轨迹），所以任何一个合格的泄漏检测都应该抓到。
-    如果检测抓不到它们，说明检测本身是空的（vacuous），必须先修检测。
+    第四轮审查（W8）指出初版只放了两条「整轨迹容量统计」，且它们自己算的——
+    和正实验走的是**不同代码路径**，所以负控制证明不了正实验那条路的检测力。
+    现在三条对齐三个通道：
+
+    | 通道 | 对照特征 | 只有哪条实验能抓到 |
+    |---|---|---|
+    | 未来**容量值** | `LEAK_cap_min_full` | 扰动臂（改容量） |
+    | 未来**行是否存在** | `LEAK_n_cycles_full` | 删行臂（删掉 t>K 的行） |
+    | 未来**标签** | `LEAK_eol_cycle_full` | 两者都能 |
+
+    `LEAK_n_cycles_full` 是审查亲自补出来的漏洞：它只是一个「行数」，
+    扰动容量时**完全不变**，所以只做扰动臂的检测会放过它——
+    而它会直接把 168 写进 md。
     """
+    from config import is_at_eol as _is_eol  # 判定口径仍走唯一入口（D17）
+
     rows = []
     for cell, sub in split_by_battery(df).items():
         sub = sub.sort_values("cycle")
         cap = sub["capacity_Ah"].to_numpy(float)
         cyc = sub["cycle"].to_numpy(int)
-        hit = np.flatnonzero(cap <= EOL_THRESHOLD_AH)
+        hit = np.flatnonzero(_is_eol(cap))
         rows.append(
             {
                 "电池": cell,
                 "LEAK_cap_min_full": float(cap.min()),
+                "LEAK_n_cycles_full": float(len(sub)),
                 "LEAK_eol_cycle_full": float(cyc[hit[0]]) if len(hit)
                 else float(cyc[-1] + 1),
             }
@@ -279,62 +327,107 @@ def _leaky_control(df: pd.DataFrame, K: int) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def _leaky_extra(full: pd.DataFrame, feat: pd.DataFrame) -> pd.DataFrame:
+    """给 `build_features(..., extra=...)` 用的**故意泄漏**列。
+
+    形状是 `(全量 df, 已算好的特征帧) -> 特征帧`，所以它走的是**同一条管线末端**，
+    与真实特征共享 `build_features` 的返回路径——这样负控制才能证明
+    「管线里的泄漏检测有分辨力」，而不只是「比较器有分辨力」（审查 F5）。
+    """
+    leak = _leaky_control(full)
+    return feat.merge(leak, on="电池", how="left")
+
+
 def leakage_test(df: pd.DataFrame, K: int) -> dict:
-    """两段式泄漏检测。
+    """**三臂**泄漏检测：两条正实验 + 一条负控制。
 
-    1. **正实验**：真实特征集在「未来被扰动」后必须**逐个数值不变**；
-    2. **负控制**：故意泄漏的对照特征集必须**发生变化**——否则说明检测没有分辨力。
+    正实验（真实特征集必须**逐位不变**）：
+    - **A 扰动臂**：把 t>K 的容量随机扰动 ±PERTURB_AH → 抓「用了未来容量值」；
+    - **B 删行臂**：把 t>K 的行**整行删掉**再算 → 抓「用了未来行的存在性/元数据」
+      （行数、最大循环号、未来时刻的温度统计……）。
+      **这一臂是第四轮审查补的**：初版只有 A，而 A 对元数据**完全无感**——
+      一个 `n_cycles = len(全表)` 的变异能顺利通过 A、通过白名单断言、还能把 168 写进 md。
 
-    只做 1 不做 2 的检测，等价于「我保证没泄漏」。
+    负控制：三条故意泄漏的对照特征，必须**被对应的臂抓到**；
+    抓不到说明那一臂没有分辨力，必须先修检测。
+
+    只做正实验、不做负控制的检测，等价于「我保证没泄漏」。
     """
     base = build_features(df, K)
+
+    # --- 正实验 A：扰动未来容量 ---
     perturbed = _perturb_future(df, K, RANDOM_SEED)
-
-    # --- 正实验 ---
     pert = build_features(perturbed, K)
-    if not base["电池"].tolist() == pert["电池"].tolist():
-        raise AssertionError("扰动前后电池顺序不一致")
-    changed = []
-    for col in base.columns:
-        if col == "电池":
-            continue
-        a = base[col].to_numpy(float)
-        b = pert[col].to_numpy(float)
-        bad = ~np.isclose(a, b, rtol=0, atol=0, equal_nan=True)
-        if bad.any():
-            for i in np.flatnonzero(bad):
-                changed.append((col, base["电池"].iloc[i], float(a[i]), float(b[i])))
-    if changed:
-        raise AssertionError(
-            "以下特征用到了 t>K 的数据（未来信息泄漏）：\n"
-            + "\n".join(f"  {c} @{cell}: {x} -> {y}" for c, cell, x, y in changed)
-        )
+    changed_a = _diff_frames(base, pert)
 
-    # --- 负控制 ---
-    leaky_base = _leaky_control(df, K)
-    leaky_pert = _leaky_control(perturbed, K)
-    caught = []
-    control_cols = [c for c in leaky_base.columns if c != "电池"]
+    # --- 正实验 B：删掉未来行 ---
+    # 注意：这里不能只删容量列，必须整行删——否则「行数」这种元数据仍是未来的。
+    kept = df[df["cycle"] <= K].copy()
+    deleted = build_features(kept, K)
+    changed_b = _diff_frames(base, deleted)
+
+    # --- 负控制：三个通道各一条，且**都走 build_features 的 extra 钩子** ---
+    leaky_base = build_features(df, K, extra=_leaky_extra)
+    leaky_pert = build_features(perturbed, K, extra=_leaky_extra)
+    leaky_del = build_features(kept, K, extra=_leaky_extra)
+    control_cols = [c for c in leaky_base.columns if c.startswith("LEAK_")]
     assert control_cols, "负控制特征集为空，检测无意义"
-    for col in control_cols:
-        a = leaky_base[col].to_numpy(float)
-        b = leaky_pert[col].to_numpy(float)
-        if (~np.isclose(a, b, rtol=0, atol=0, equal_nan=True)).any():
-            caught.append(col)
-    if len(caught) != len(control_cols):
+    caught_a = _cols_hit(control_cols, leaky_base, leaky_pert)
+    caught_b = _cols_hit(control_cols, leaky_base, leaky_del)
+
+    if changed_a:
         raise AssertionError(
-            f"负控制失败：本该被抓到的泄漏特征没被抓到（{set(control_cols) - set(caught)}），"
-            "说明这个检测本身抓不到泄漏"
+            "以下特征用到了 t>K 的**容量值**（扰动臂发现）：\n"
+            + "\n".join(f"  {d}" for d in changed_a)
         )
+    if changed_b:
+        raise AssertionError(
+            "以下特征用到了 t>K 的**行/元数据**（删行臂发现）：\n"
+            + "\n".join(f"  {d}" for d in changed_b)
+        )
+    # 每条对照特征必须至少被一条臂抓到；且两个通道各自都要有臂负责
+    missed = [c for c in control_cols if c not in caught_a and c not in caught_b]
+    if missed:
+        raise AssertionError(
+            f"负控制失败：本该被抓到的泄漏特征没被抓到（{missed}）——这一臂没有分辨力"
+        )
+    if not caught_a:
+        raise AssertionError("扰动臂一条对照特征都没抓到，等于没测")
+    if not caught_b:
+        raise AssertionError("删行臂一条对照特征都没抓到，等于没测")
 
     return {
         "K": K,
         "n_features": base.shape[1] - 1,
         "n_cells": len(base),
         "n_future_rows": int((df["cycle"] > K).sum()),
-        "changed": changed,
-        "control_caught": caught,
+        "changed_a": changed_a,
+        "changed_b": changed_b,
+        "caught_a": caught_a,
+        "caught_b": caught_b,
     }
+
+
+def _cols_hit(cols: list[str], a: pd.DataFrame, b: pd.DataFrame) -> list[str]:
+    """哪些列在两帧之间变了。`_diff_frames` 返回的是「列 @电池」字符串，这里按前缀归类。"""
+    diffs = _diff_frames(a, b)
+    return [c for c in cols if any(d.startswith(c + " @") for d in diffs)]
+
+
+def _diff_frames(a: pd.DataFrame, b: pd.DataFrame) -> list[str]:
+    """逐列逐行严格比对（rtol=0, atol=0），返回不一致的「列 @电池」清单。"""
+    if a["电池"].tolist() != b["电池"].tolist():
+        raise AssertionError("两帧的电池顺序不一致")
+    out = []
+    for col in a.columns:
+        if col == "电池":
+            continue
+        x = a[col].to_numpy(float)
+        y = b[col].to_numpy(float)
+        bad = ~np.isclose(x, y, rtol=0, atol=0, equal_nan=True)
+        for i in np.flatnonzero(bad):
+            out.append(f"{col} @{a['电池'].iloc[i]}: {x[i]!r} -> {y[i]!r}")
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -373,7 +466,7 @@ def correlation_table(feat: pd.DataFrame, prof: pd.DataFrame) -> pd.DataFrame:
             rows.append({"特征": col, "n": int(keep.sum()), "r": "—",
                          "判读": "有效样本 < 3，无法计算"})
             continue
-        r, _p = stats.pearsonr(x[keep], eol_vals[keep])
+        r, p = stats.pearsonr(x[keep], eol_vals[keep])
         # 竖线必须转义成 `\|`：markdown 表格里裸的 | 会被当成列分隔符。
         # 首版就是 `|r| < 0.997` 把整张表撕成了两半。
         if abs(r) >= r_crit:
@@ -385,6 +478,7 @@ def correlation_table(feat: pd.DataFrame, prof: pd.DataFrame) -> pd.DataFrame:
                 "特征": col,
                 "n": int(keep.sum()),
                 "r": f"{r:+.3f}",
+                "p": f"{p:.3f}",
                 "判读": verdict,
             }
         )
@@ -422,9 +516,103 @@ def k_sensitivity(df: pd.DataFrame, prof: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+GOLDEN: dict[str, dict[str, float]] = {
+    # 在 K = 50 上把关键特征钉死。这不是「测自己」，是**回归护栏**：
+    # 一旦有人改了 K_MAIN、改了再生阈值、把曲率换成斜率、或动坏了残差窗口，
+    # 这里的数字立刻对不上（第四轮审查 F7 实测：K_MAIN→100、曲率→线性斜率、
+    # REGEN 阈值→0 这三类改动当时**一条断言都拦不住**，还会照样改写 md）。
+    # 课程方若更新数据集，这些值会全部 FAIL —— 与 sanity_check 的 EXPECTED_* 同一性质：
+    # 这是特性不是 bug（README 已写明）。
+    "B0005": {"cap_first": 1.8565, "cap_at_K": 1.7674, "curvature_to_K": -11.19506,
+              "resid_std_trailing": 0.01828, "n_regen_to_K": 1.0},
+    "B0006": {"cap_first": 2.0353, "cap_at_K": 1.7758, "curvature_to_K": 0.04384,
+              "resid_std_trailing": 0.03990, "n_regen_to_K": 3.0},
+    "B0007": {"cap_first": 1.8911, "cap_at_K": 1.8002, "curvature_to_K": -6.05846,
+              "resid_std_trailing": 0.01438, "n_regen_to_K": 0.0},
+    "B0018": {"cap_first": 1.8550, "cap_at_K": 1.6607, "curvature_to_K": 0.49851,
+              "resid_std_trailing": 0.03498, "n_regen_to_K": 2.0},
+}
+
+GOLDEN_REL_TOL = 1e-4
+
+
+def assert_golden(feat: pd.DataFrame) -> None:
+    """把 K_MAIN 上的关键特征与 `GOLDEN` 比对。"""
+    got = feat.set_index("电池")
+    bad = []
+    for cell, want in GOLDEN.items():
+        if cell not in got.index:
+            bad.append(f"{cell} 不在特征表里")
+            continue
+        for name, w in want.items():
+            g = float(got.loc[cell, name])
+            tol = GOLDEN_REL_TOL * max(1.0, abs(w))
+            if abs(g - w) > tol:
+                bad.append(f"{cell}.{name}: 期望 {w}，实际 {g}（容差 {tol:.1e}）")
+    if bad:
+        raise AssertionError(
+            "golden 值对不上 —— K / 阈值 / 特征定义被改动过：\n"
+            + "\n".join(f"  {x}" for x in bad)
+        )
+
+
+def curvature_profile(df: pd.DataFrame, ks=K_SWEEP) -> pd.DataFrame:
+    """**原始曲率随 K 的剖面**——这是「曲率不稳定」的正确证据。
+
+    第四轮审查 F2 指出：md 里原来拿「四块电池之间差多少」论证「不稳定」，
+    那是**跨电池离散**，不是**同一块电池随观测窗口的漂移**，两者不是一回事。
+    真正的证据是这张表：同一块电池，K 从 20 变到 100 时曲率怎么跑；
+    再给出二次项系数 c2 的跨 K 范围，用来解释「它为什么跑」。
+    """
+    rows = []
+    for cell, sub in split_by_battery(df).items():
+        sub = sub.sort_values("cycle")
+        rec = {"电池": cell}
+        c2s = []
+        for K in ks:
+            head = sub[sub["cycle"] <= K]
+            if len(head) < K:
+                rec[f"K={K}"] = "—"
+                continue
+            rec[f"K={K}"] = f"{_curvature(head):.2f}"
+            x = head["cycle"].to_numpy(float) / 100.0
+            y = head["capacity_Ah"].to_numpy(float)
+            c2s.append(float(np.polyfit(x, y, 2)[0]))
+        rec["c2 跨 K 范围"] = f"[{min(c2s):+.3f}, {max(c2s):+.3f}]" if c2s else "—"
+        rows.append(rec)
+    return pd.DataFrame(rows)
+
+
+def max_feasible_k(df: pd.DataFrame) -> int:
+    """能构造出完整 1..K 窗口的最大 K（= 最短那条序列的长度）。"""
+    return int(min(len(s) for s in split_by_battery(df).values()))
+
+
 # ---------------------------------------------------------------------------
 # markdown
 # ---------------------------------------------------------------------------
+def _assert_matches_individual(df: pd.DataFrame) -> None:
+    """F11：`features._linear`/`_curvature` 与 `individual._linear`/`_curvature_scaled`
+    数学上完全相同（审查实测逐位一致），但当时**没有任何断言保证这条等价**——
+    改一处就会静默分叉。这里补上等价性检查。
+
+    唯一的**有意差异**：本模块在两参数样本不足时返回 NaN（`len<3` 守卫），
+    而 W5 那边用两点也能拟合。所以只在 len ≥ 3 上比对。
+    """
+    from individual import _curvature_scaled, _linear as ind_linear
+
+    sub = split_by_battery(df)["B0005"]
+    head = sub[sub["cycle"] <= K_MAIN].sort_values("cycle")
+    s_feat, r2_feat = _linear(head)
+    s_w5, r2_w5 = ind_linear(head)
+    assert abs(s_feat - s_w5) <= 1e-15, f"线性斜率两份实现分叉：{s_feat!r} vs {s_w5!r}"
+    assert abs(r2_feat - r2_w5) <= 1e-15, f"线性 R² 两份实现分叉：{r2_feat!r} vs {r2_w5!r}"
+    a, b = _curvature(head), _curvature_scaled(head)
+    assert abs(a - b) <= 1e-12 * max(1.0, abs(b)), (
+        f"曲率两份实现分叉：features={a!r} individual={b!r}"
+    )
+
+
 def render_md(
     feat: pd.DataFrame,
     corr: pd.DataFrame,
@@ -432,12 +620,17 @@ def render_md(
     leak: dict,
     n_cycle_full: dict[str, int],
     prof: pd.DataFrame,
+    curv_tbl: pd.DataFrame,
+    k_feasible: int,
 ) -> str:
     n_eff = int(corr["n"].max())
     r_crit = r_critical(n_eff)
     censored = prof.loc[prof["censored"], "battery_id"].tolist()
     n_total = len(prof)
     n_sig = int(corr["判读"].str.contains("达到").sum())
+    min_p = float(corr["p"].astype(float).min())
+    drop_ratio = dict(zip(feat["电池"], feat["drop_ratio_to_K"]))
+    top_drop = max(drop_ratio, key=drop_ratio.get)
     flip = ksens.loc[ksens["符号是否稳定"] == "**翻号**", "特征"].tolist()
     stable = ksens.loc[ksens["符号是否稳定"] == "稳定", "特征"].tolist()
 
@@ -474,23 +667,71 @@ def render_md(
     cur = feat["curvature_to_K"].to_numpy(float)
     out += [
         "",
-        "**一条要提前说的特征缺陷**："
-        f"K={K_MAIN} 时无量纲曲率跨 {np.nanmin(cur):.2f} 到 {np.nanmax(cur):+.2f}，"
-        "同一个指标在四块电池上差了两个数量级，这本身就说明它不稳。"
-        "原因是分母是二次拟合的一次项系数 |b|，而前 50 个循环里容量几乎还没开始掉，"
-        "b 接近 0 时把小误差放大。"
-        "第五节会看到它在 K 敏感性里翻号，就是同一个不稳的另一面——"
-        "**所以 W13 不把它当主力特征**，只留作「形状」的辅助说明。",
+        "**一条要提前说的特征缺陷：`curvature_to_K` 随观测窗口剧烈漂移。**",
         "",
-        "## 三、泄漏证明：不靠保证，靠两段实验",
+        "同一块电池、只改观测窗口 K，无量纲曲率是这样跑的：",
         "",
-        f"把 **t > K 的 {leak['n_future_rows']} 行容量随机扰动 ±{PERTURB_AH} Ah**"
-        f"（额定的 ±{PERTURB_AH / 2.0:.0%}，远超真实波动），重算全部特征：",
+        curv_tbl.to_markdown(index=False),
         "",
-        f"- **正实验**：{leak['n_features']} 个因果特征 × {leak['n_cells']} 块电池，"
-        "在扰动前后**逐个完全相同**（`rtol=0, atol=0` 严格判等）→ 没有一个特征碰到未来数据。",
-        f"- **负控制**：故意泄漏的 `{'`、`'.join(leak['control_caught'])}` "
-        "（用整条轨迹算的）**全部被抓到** → 说明这个检测真的能发现泄漏，不是空转。",
+        "这才是「不稳」的正确证据——**同一块电池随 K 漂移**，而不是「四块电池之间差多少」"
+        "（后者是跨电池离散，两回事）。"
+        "例如 B0005 从 K=40 的 "
+        f"{curv_tbl.loc[curv_tbl['电池'] == 'B0005', 'K=40'].iloc[0]} 掉到 K=50 的 "
+        f"{curv_tbl.loc[curv_tbl['电池'] == 'B0005', 'K=50'].iloc[0]}；"
+        "二次项系数 c2 的跨 K 范围见末列，它连**符号**都不稳。",
+        "",
+        "⚠️ 我原来在这里写的机制是**编的**（第四轮审查 F2 逐条否证）："
+        "「前 50 个循环容量几乎还没开始掉」——不成立，特征表里 `drop_ratio_to_K` 显示 "
+        f"{top_drop} 已掉 {drop_ratio[top_drop] * 100:.2f}%、"
+        f"B0018 已掉 {drop_ratio['B0018'] * 100:.2f}%；"
+        "「b 接近 0」——也不成立，B0006/B0018 的 b 分别是 −0.607 和 −0.930，"
+        "离 0 有 414 / 850 个标准误；"
+        "「差了两个数量级」——按端点绝对值算只有 "
+        f"{abs(np.nanmin(cur)) / abs(np.nanmax(cur)):.1f} 倍。"
+        "**结论（不稳、不作主力）保留，但理由必须换成上面这张 K 剖面表。**"
+        "W13 里它只作「形状」的辅助说明。",
+        "",
+        "## 三、泄漏证明：两条正实验 + 一条带对照的负控制",
+        "",
+        f"**正实验 A（扰动臂）**：把 t > K 的 {leak['n_future_rows']} 行容量随机扰动 "
+        f"±{PERTURB_AH} Ah（额定的 ±{PERTURB_AH / 2.0:.0%}），重算全部特征。",
+        "",
+        f"**正实验 B（删行臂）**：把 t > K 的 {leak['n_future_rows']} 行**整行删掉**，重算全部特征。",
+        "",
+        f"两臂都必须让 {leak['n_features']} 个特征 × {leak['n_cells']} 块电池"
+        "**逐个完全相同**（`rtol=0, atol=0` 严格判等）。",
+        "",
+        "⚠️ **为什么必须有第二臂**（第四轮审查 F1）：初版只有扰动臂，而它只能发现"
+        "「用了未来的**容量值**」。如果某列用的是「未来**行是否存在**」这类元数据"
+        "（行数、最大循环号……），扰动容量时它**一个数都不会变**——"
+        "审查据此造了一个 `n_cycles = len(全表)` 的变异，它顺利通过扰动臂、通过列名白名单，"
+        "最后把 168 写进了本文件。删行臂就是专门堵这个洞的。",
+        "",
+        "**负控制**（三条，分别对应三种泄漏通道，且**都走 `build_features` 的 `extra` 钩子**，"
+        "与真实特征共享同一段返回路径）：",
+        "",
+        "| 对照特征 | 通道 | 被哪一臂抓到 |",
+        "|---|---|---|",
+    ]
+    a_set, b_set = set(leak["caught_a"]), set(leak["caught_b"])
+    for name, channel in (
+        ("LEAK_cap_min_full", "未来容量值"),
+        ("LEAK_n_cycles_full", "未来行是否存在"),
+        ("LEAK_eol_cycle_full", "未来标签"),
+    ):
+        marks = []
+        if name in a_set:
+            marks.append("扰动臂")
+        if name in b_set:
+            marks.append("删行臂")
+        out.append(f"| `{name}` | {channel} | {'、'.join(marks)} |")
+    out += [
+        "",
+        "三条**全部被抓到**，且两臂各自都至少抓到一条 → 检测有分辨力，不是空转。",
+        "",
+        "（初版的负控制是自己另外算两列、**绕过** `build_features`，所以它只证明了"
+        "「比较器有分辨力」，证明不了「管线里的泄漏检测有分辨力」——这是审查 F5。"
+        "现在对照列由 `build_features(..., extra=...)` 在管线末端注入。）",
         "",
         "只做正实验、不做负控制的检测，等价于「我保证没泄漏」——"
         "这句话在报告里没有价值，能被复现的断言才有。",
@@ -521,17 +762,28 @@ def render_md(
         "**即使有，也不作为筛选依据**——"
         f"理由不是「我们不信任统计」，而是 n={n_eff} 时任何基于相关的选择都无法与事后挑选区分开。",
         "",
-        "## 五、换一个观测窗口 K，方向还稳吗",
+        "## 五、换一个观测窗口 K：**只作描述，不作推断**",
         "",
         ksens.round(3).to_markdown(index=False),
         "",
-        f"- 符号**稳定**的特征：{'、'.join(f'`{c}`' for c in stable) if stable else '无'}；",
-        f"- 符号**随 K 翻号**的特征：{'、'.join(f'`{c}`' for c in flip) if flip else '无'}。",
+        f"⚠️ **n = {n_eff} 时，这一整节的符号比较都不能当证据用**（第四轮审查 F4）：",
+        f"10 个特征的 p 值**全部 > 0.20**（最小的也有 "
+        f"{min_p:.2f}）；而 n={n_eff} 时 Fisher z 的标准误 "
+        f"`1/√(n−3)` 分母为负、根本无定义，r 的 95% 置信区间是**整个 [−1, 1]**。",
+        "所以下面这两行只是**描述**，不是「哪些特征可信」的结论：",
         "",
-        ("翻号说明这个特征承载的是窗口长度的效应，而不是与寿命的稳定关联，"
-         "**不能拿它当「越 X 越短命」这类结论的依据**。"
-         if flip else
-         "没有特征翻号，这是个弱证据（n=4 下符号稳定也可能是巧合）。"),
+        f"- 符号未变：{'、'.join(f'`{c}`' for c in stable) if stable else '无'}；",
+        f"- 符号变过：{'、'.join(f'`{c}`' for c in flip) if flip else '无'}。",
+        "",
+        "而且「变号」里混着**近零值**（`resid_std_trailing` 在 K=30 是 0.032、K=40 是 −0.026），"
+        "把一个几乎为 0 的相关系数从正变负叫作「窗口长度的效应」，是**给噪声安机制**——"
+        "这正是 D19 第 3 条禁止的事。所以本节**不下**这类结论。",
+        "",
+        "另一处口径提醒：K=20 时 `slope_tail20_Ah_per_100` 与 "
+        "`slope_to_K_Ah_per_100` 是**同一个量**（20 个点的「末尾 20」就是全部），"
+        "所以 K=20 那一列的两个相关系数必然相同（都是 "
+        f"{ksens.loc[ksens['特征'] == 'slope_to_K_Ah_per_100', 'K=20'].iloc[0]:.3f}），"
+        "不是两条独立证据。",
         "",
         "## 六、这一节刻意没做的事",
         "",
@@ -541,7 +793,7 @@ def render_md(
         "- **没有用 `cell_censored` / `cap_min` / `eol_cycle` 这类整轨迹量**："
         "它们是标签或标签的变形，W3 已登记在 `PROFILE_EXCLUDE`。",
         "",
-        "## 七、观测长度（供下游参考）",
+        "## 七、观测长度与 K 的可行范围",
         "",
         "| 电池 | 总循环 | 前 K 占比 |",
         "|---|---|---|",
@@ -550,9 +802,15 @@ def render_md(
         out.append(f"| {cell} | {n} | {K_MAIN / n:.0%} |")
     out += [
         "",
-        f"最短的 {min(n_cycle_full, key=n_cycle_full.get)} 只有 "
-        f"{min(n_cycle_full.values())} 循环，所以 K 不能超过约 100，"
-        "否则最短个体连一个窗口都给不出。",
+        f"**K 的可行上限是 {k_feasible}**（= 最短序列 "
+        f"{min(n_cycle_full, key=n_cycle_full.get)} 的长度），"
+        f"K = {k_feasible + 1} 就会因为凑不出完整的 1..K 窗口而报错。",
+        "",
+        f"正式口径取 K = {K_MAIN} **不是**因为「再大就跑不动」——"
+        f"{k_feasible} 都能跑。取 {K_MAIN} 是为了给最短的那块留出 "
+        f"{min(n_cycle_full.values()) - K_MAIN} 个循环"
+        f"（{1 - K_MAIN / min(n_cycle_full.values()):.0%}）做后段验证。"
+        "（初版这里写「K 不能超过约 100，否则给不出窗口」，是错的——第四轮审查 F3。）",
         "",
     ]
     return "\n".join(out)
@@ -571,22 +829,39 @@ def main() -> int:
     for cell, sub in series.items():
         assert len(sub) >= K_MAIN, f"{cell} 观测长度 {len(sub)} < K={K_MAIN}"
 
-    # --- 断言 2：泄漏证明 ---
+    # --- 断言 2：泄漏证明（两条正实验 + 带对照的负控制）---
     leak = leakage_test(df, K_MAIN)
 
-    # --- 断言 3：特征里不许出现 FEATURE_EXCLUDE 的列名 ---
+    # --- 断言 3：特征列名必须与 SCHEMA 逐项相等（F7：加列/改名/换序都必须炸）---
     from preprocess import FEATURE_EXCLUDE
 
     feat = build_features(df, K_MAIN)
+    assert tuple(feat.columns[1:]) == SCHEMA, (
+        f"特征列与 SCHEMA 不一致：\n  期望 {SCHEMA}\n  实际 {tuple(feat.columns[1:])}"
+    )
+
+    # --- 断言 4：不许出现 FEATURE_EXCLUDE 的列名 ---
     forbidden = set(FEATURE_EXCLUDE) & set(feat.columns)
     assert not forbidden, f"特征集里混进了被禁止作特征的列：{sorted(forbidden)}"
 
-    # --- 断言 4：每个 K 都能跑通（K 敏感性表不能有空洞）---
+    # --- 断言 5：golden 值（F7：K / 再生阈值 / 曲率定义被改动时必须炸）---
+    assert_golden(feat)
+
+    # --- 断言 6：K 敏感性表不许有空洞（F7：全 NaN 曾被判「稳定」并照样写 md）---
     corr = correlation_table(feat, prof)
     ksens = k_sensitivity(df, prof)
     assert list(ksens.columns) == ["特征", *[f"K={K}" for K in K_SWEEP], "符号是否稳定"]
+    k_vals = ksens[list(ksens.columns[1:-1])].apply(pd.to_numeric, errors="coerce")
+    assert k_vals.notna().all().all(), "K 敏感性表里有 NaN —— 某个 K 没算出来"
 
-    md = render_md(feat, corr, ksens, leak, n_cycle_full, prof)
+    # --- 断言 7：与 W5 的形态函数等价（F11：两份实现必须同值）---
+    _assert_matches_individual(df)
+
+    curv_tbl = curvature_profile(df)
+    k_feasible = max_feasible_k(df)
+    md = render_md(feat, corr, ksens, leak, n_cycle_full, prof, curv_tbl, k_feasible)
+    # F10：md 里出现 n=4 就是叙述与样本量脱节（B0007 删失后只有 3 个标签）
+    assert "n=4" not in md and "n = 4" not in md, "md 里残留了 n=4 的说法"
     TABLE_MD.write_text(md, encoding="utf-8")
 
     r_crit = r_critical(int(corr["n"].max()))
@@ -594,10 +869,11 @@ def main() -> int:
     print()
     print(feat.round(5).to_string(index=False))
     print()
-    print("泄漏检测：")
-    print(f"  正实验：{leak['n_features']} 个因果特征 × {leak['n_cells']} 块，"
-          f"扰动未来 {leak['n_future_rows']} 行后逐个不变 ✅")
-    print(f"  负控制：{leak['control_caught']} 全部被抓到 ✅")
+    print("泄漏检测（两条正实验 + 带对照的负控制）：")
+    print(f"  A 扰动臂：扰动未来 {leak['n_future_rows']} 行容量，"
+          f"{leak['n_features']} 个特征 × {leak['n_cells']} 块逐个不变 ✅")
+    print(f"  B 删行臂：删掉未来 {leak['n_future_rows']} 行后重算，同样逐个不变 ✅")
+    print(f"  负控制：扰动臂抓到 {leak['caught_a']}；删行臂抓到 {leak['caught_b']} ✅")
     print()
     print(f"与 EOL 的相关（n={int(corr['n'].max())}，临界 |r|={r_crit:.3f}）：")
     print(corr.to_string(index=False))
