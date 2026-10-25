@@ -1,9 +1,9 @@
-"""变异测试：证明 W7/W8 的断言真的能失败。
+"""变异测试：证明 W7/W8/W10 的断言真的能失败。
 
 一个从不失败的断言等于没有断言。做法是手工注入已知错误，
 看对应的断言是否**按预期炸掉**。每次注入都必须让管线以非零退出码结束。
 
-当前 **11 条**：W7 六条 + W8 四条 + 一条回归用例（W8-R1）。
+当前 **16 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + 一条回归用例（W8-R1）。
 
 它真的抓到过东西（不只是验证代码）：
 1. 最初我给 W8 写的变异是「把 trailing 滚动窗口换成居中窗口」，预期泄漏检测会炸——
@@ -15,7 +15,7 @@
 
 用法
 ----
-    python scripts/mutation_test.py      # 11/11 通过才说明这些断言不是空的
+    python scripts/mutation_test.py      # 16/16 通过才说明这些断言不是空的
 """
 
 from __future__ import annotations
@@ -58,6 +58,8 @@ def run_case(name: str, target, mutate, expect_in: str) -> bool:
 def main() -> int:
     import sensitivity
     import features
+    import models_ml
+    import models_parametric
 
     _orig_build = features.build_features  # W8 三个变异都以原函数为基底
     _orig_cap_series = sensitivity.cap_series  # W7-M4 也要
@@ -241,8 +243,125 @@ def main() -> int:
         )
     )
 
+    # --- W10 变异 1：偷偷给 M3 加第二自变量（cycle²）---
+    # 这会把「树没有趋势概念」的干净反例弄脏，而且断言的守护点必须在**调用方**：
+    # fit_rf 自己内部的断言救不了「fit_rf 被整个换掉」。
+    _orig_fit_rf = models_ml.fit_rf
+
+    def two_feature_fit(t, y, **kw):
+        import numpy as np
+        from sklearn.ensemble import RandomForestRegressor
+
+        t = np.asarray(t, float)
+        est = RandomForestRegressor(
+            n_estimators=kw.get("n_estimators", models_ml.N_TREES),
+            max_depth=kw.get("max_depth"),
+            min_samples_leaf=kw.get("min_samples_leaf", 1),
+            bootstrap=kw.get("bootstrap", True),
+            random_state=kw.get("seed", 42),
+            n_jobs=1,
+        )
+        est.fit(np.column_stack([t, t**2]), np.asarray(y, float))
+        return {
+            "name": "M3 随机森林", "estimator": est, "features": ["cycle", "cycle^2"],
+            "t_min": float(t.min()), "t_max": float(t.max()),
+            "n_estimators": int(kw.get("n_estimators", models_ml.N_TREES)),
+            "max_depth": kw.get("max_depth"), "bootstrap": True, "n_train": len(t),
+        }
+
+    results.append(
+        run_case(
+            "W10-M1 M3 偷偷多吃一个自变量 cycle²（反例不再干净）",
+            models_ml,
+            {"attr": "fit_rf", "new": two_feature_fit},
+            "只许吃",
+        )
+    )
+
+    # --- W10 变异 2：给外推段补一条线性趋势（"手动修一下"这种最危险的做法）---
+    _orig_predict = models_ml.predict_rf
+
+    def trended_predict(model, t):
+        import numpy as np
+
+        t = np.asarray(t, float)
+        base = _orig_predict(model, t)
+        return base - 0.001 * np.maximum(0.0, t - model["t_max"])
+
+    results.append(
+        run_case(
+            "W10-M2 外推段被偷偷补一条线性趋势（毁掉「分段常数」这个事实）",
+            models_ml,
+            {"attr": "predict_rf", "new": trended_predict},
+            "不是严格常数",
+        )
+    )
+
+    # --- W10 变异 3：EOL 落在训练区间内，却不标「查表」---
+    def silent_lookup_eol(model, n_obs, tau=None):
+        import numpy as np
+
+        from config import EOL_SEARCH_MULTIPLE, is_at_eol
+
+        grid = np.arange(1, int(np.ceil(n_obs * EOL_SEARCH_MULTIPLE)) + 1)
+        hit = np.asarray(is_at_eol(models_ml.predict_rf(model, grid), tau))
+        idx = np.flatnonzero(hit)
+        return (int(grid[idx[0]]), "") if len(idx) else (None, "")
+
+    results.append(
+        run_case(
+            "W10-M3 训练区间内的「EOL」不标查表（把查表当预测）",
+            models_ml,
+            {"attr": "eol_rf", "new": silent_lookup_eol},
+            "查表",
+        )
+    )
+
+    # --- W10 变异 4：强制浅树，让「长到底 = 最后一个观测值」不成立 ---
+    def shallow_fit(t, y, **kw):
+        kw["max_depth"] = 3
+        return _orig_fit_rf(t, y, **kw)
+
+    results.append(
+        run_case(
+            "W10-M4 强制 max_depth=3（外推值不再等于最后一次观测）",
+            models_ml,
+            {"attr": "fit_rf", "new": shallow_fit},
+            "最右叶子",
+        )
+    )
+
+
+    # --- W9 变异 5：把「外推单调」的判据区间改回 [1, 5N]（第六轮审查抓到的真 bug）---
+    # 老口径把训练段内那点上翘也算进去，于是 B0005/B0007 被判成"外推不单调"→ 不给寿命。
+    # 现在 render_md 里有一条断言「四块电池都该有寿命」，专门守这件事。
+    _orig_fit_de = models_parametric.fit_double_exp
+
+    def old_window_fit(t, y, p0=None):
+        import numpy as np
+
+        mod = _orig_fit_de(t, y, p0=p0)
+        if not mod["converged"]:
+            return mod
+        p = mod["params"]
+        probe = np.linspace(1.0, float(len(t) * 5), 2000)
+        curve = models_parametric._double_exp(probe, p["a"], p["b"], p["c"], p["d"])
+        deriv = (p["a"] * p["b"] * np.exp(p["b"] * probe)
+                 + p["c"] * p["d"] * np.exp(p["d"] * probe))
+        ok = bool(np.all(deriv < 0) and np.all(curve > 0))
+        return {**mod, "monotone": ok, "valid": ok,
+                "why": "" if ok else "外推段不严格递减/为正（旧口径：整条曲线）"}
+
+    results.append(
+        run_case(
+            "W9-M5 外推单调判据退回整条曲线 [1,5N]（R6-2 的真 bug）",
+            models_parametric,
+            {"attr": "fit_double_exp", "new": old_window_fit},
+            "闸门现在只挡外推段",
+        )
+    )
+
     # --- W8 回归用例：center=True 在「先截断」下**不**泄漏（应通过泄漏检测，但值确实变了）---
-    # 审查 F9 指出历史叙述里这条只有注释、没有可复现的变异。这里固化成用例：
     # 判据不是「炸掉」，而是「不炸 且 数值不同」——正好说明它是口径问题、不是泄漏问题。
     def centered_resid(sub, window=features.TREND_WINDOW):
         import numpy as np

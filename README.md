@@ -35,21 +35,25 @@ pip install -r requirements.txt
 python scripts/run_all.py
 ```
 
-当前阶段（W1–W8）管线包含 7 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性 → 早期特征与泄漏证明**。
-W20 会扩展成完整管线（… → 建模 → 不确定性 → 图表 → 报告）。
+当前阶段（W1–W10）管线包含 10 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性 → 早期特征与泄漏证明 → 评测口径 → M1/M2 参数模型 → M3 随机森林（外推失效反例）**。
+W20 会扩展成完整管线（… → 不确定性 → 图表 → 报告）。
 
 也可以单独跑某一步：
 
 ```bash
-python src/sanity_check.py     # 数据体检（11 条断言）
-python src/preprocess.py       # 清洗决策表 + 个体档案
-python src/explore.py          # 退化曲线与个体差异（fig01/fig02）
-python src/individual.py       # 个体差异五维量化（fig03）
-python src/regeneration.py     # 容量再生检测与共模分解（fig04）
-python src/sensitivity.py      # EOL 阈值敏感性（fig05 + 断点表）
-python src/features.py         # 早期特征 + 未来信息泄漏证明
+python src/sanity_check.py       # 数据体检（11 条断言）
+python src/preprocess.py         # 清洗决策表 + 个体档案
+python src/explore.py            # 退化曲线与个体差异（fig01/fig02）
+python src/individual.py         # 个体差异五维量化（fig03）
+python src/regeneration.py       # 容量再生检测与共模分解（fig04）
+python src/sensitivity.py        # EOL 阈值敏感性（fig05 + 断点表）
+python src/features.py           # 早期特征 + 未来信息泄漏证明
+python src/evaluate.py           # 评测口径（时序划分 / 指标 / EOL 误差）
+python src/models_parametric.py  # M1 线性 / M2 双指数（fig06）
+python src/models_ml.py          # M3 随机森林：外推失效（fig07/fig08）
 
-python scripts/mutation_test.py  # 只查「断言是不是空的」：5 个注入错误必须全部被抓
+python scripts/mutation_test.py  # 只查「断言是不是空的」：16 个注入错误必须全部被抓
+python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/单点/空表…）不许静默给错答案
 ```
 
 ### 关于运行环境
@@ -97,12 +101,15 @@ python scripts/mutation_test.py  # 只查「断言是不是空的」：5 个注�
 ## 目录结构
 
 ```
-src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual / regeneration / sensitivity / features
-              计划中：models / evaluate / uncertainty
-scripts/      run_all.py 一键重跑（当前 7 步，W20 扩展为完整管线）；mutation_test.py 变异测试
+src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual /
+              regeneration / sensitivity / features / evaluate / models_parametric / models_ml
+              计划中：uncertainty / 其余模型（W11 起）
+scripts/      run_all.py 一键重跑（当前 10 步，W20 扩展为完整管线）；
+              mutation_test.py 变异测试（16 条）；adversarial_test.py 病态输入测试（43 条）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
-              figures/fig01–fig05；tables/data_cleaning_decisions.md, individual_differences.md,
-              regeneration_events.md, eol_threshold_sensitivity.md, eol_breakpoints.csv, early_features.md
+              figures/fig01–fig08；tables/data_cleaning_decisions.md, individual_differences.md,
+              regeneration_events.md, eol_threshold_sensitivity.md, eol_breakpoints.csv,
+              early_features.md, eval_setup.md, model_parametric.md, model_rf.md
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
 data/raw/     课程下发的 636 行数据
