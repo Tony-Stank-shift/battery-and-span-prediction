@@ -35,7 +35,7 @@ pip install -r requirements.txt
 python scripts/run_all.py
 ```
 
-当前阶段（W1–W15）管线包含 13 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性 → 早期特征与泄漏证明 → 评测口径 → M1/M2 参数模型 → M3 随机森林（外推失效反例）→ M4 趋势+GPR → 四模型对比主表 → 三层不确定性**。
+当前阶段（W1–W16）管线包含 14 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性 → 早期特征与泄漏证明 → 评测口径 → M1/M2 参数模型 → M3 随机森林（外推失效反例）→ M4 趋势+GPR → 四模型对比主表 → 三层不确定性 → 最早可信预警时刻**。
 W20 会扩展成完整管线（… → 校准 → 报告）。
 
 也可以单独跑某一步：
@@ -54,8 +54,9 @@ python src/models_ml.py          # M3 随机森林：外推失效（fig07/fig08�
 python src/models_gpr.py         # M4 趋势 + GPR：EOL 后验分布（fig09/fig10）
 python src/compare.py            # 四模型对比主表（fig12 + 长表 CSV）
 python src/uncertainty.py        # 三层不确定性折算成循环数（fig13）
+python src/warning.py            # 最早可信预警时刻 t*（fig14）
 
-python scripts/mutation_test.py  # 只查「断言是不是空的」：28 个注入错误必须全部被抓
+python scripts/mutation_test.py  # 只查「断言是不是空的」：31 个注入错误必须全部被抓
 python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/单点/空表…）不许静默给错答案
 ```
 
@@ -106,13 +107,13 @@ python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/
 ```
 src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual /
               regeneration / sensitivity / features / evaluate / models_parametric / models_ml /
-              models_gpr / compare / uncertainty
-              计划中：预警与校准（W16–W18）
-scripts/      run_all.py 一键重跑（当前 13 步，W20 扩展为完整管线）；
-              mutation_test.py 变异测试（28 条）；adversarial_test.py 病态输入测试（43 条）
+              models_gpr / compare / uncertainty / warning
+              计划中：校准（W18）
+scripts/      run_all.py 一键重跑（当前 14 步，W20 扩展为完整管线）；
+              mutation_test.py 变异测试（31 条）；adversarial_test.py 病态输入测试（43 条）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
-              figures/fig01–fig13；tables/… model_comparison.md, uncertainty_budget.md；
-              metrics/model_comparison.csv, uncertainty_budget.csv
+              figures/fig01–fig14；tables/… model_comparison.md, uncertainty_budget.md, warning_time.md；
+              metrics/model_comparison.csv, uncertainty_budget.csv, warning_time.csv
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
 data/raw/     课程下发的 636 行数据

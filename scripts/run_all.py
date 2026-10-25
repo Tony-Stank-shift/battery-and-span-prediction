@@ -43,6 +43,7 @@ STEPS: list[tuple[str, Path]] = [
     ("M4 趋势 + GPR", ROOT / "src" / "models_gpr.py"),
     ("四模型对比主表", ROOT / "src" / "compare.py"),
     ("三层不确定性", ROOT / "src" / "uncertainty.py"),
+    ("最早可信预警时刻", ROOT / "src" / "warning.py"),
 ]
 
 

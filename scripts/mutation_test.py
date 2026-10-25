@@ -63,6 +63,7 @@ def main() -> int:
     import evaluate
     import compare
     import uncertainty
+    import warning
     import models_ml
     import models_parametric
     import models_gpr
@@ -337,6 +338,51 @@ def main() -> int:
         )
     )
 
+
+    # --- W16 变异 1：把区间上下界写反（置信度越高反而越窄）---
+    _orig_scan = warning.scan_cell
+
+    def swapped_cell(df, cell, eol_true):
+        out = _orig_scan(df, cell, eol_true)
+        for p in warning.LEVELS:
+            lo, hi = out[f"L{p}"].copy(), out[f"U{p}"].copy()
+            out[f"L{p}"], out[f"U{p}"] = hi, lo
+        return out
+
+    results.append(
+        run_case(
+            "W16-M1 置信区间的上下界写反",
+            warning,
+            {"attr": "scan_cell", "new": swapped_cell},
+            "有电池在网格内始终不稳定",
+        )
+    )
+
+    # --- W16 变异 2：命中时刻往后推 100 循环（预警晚于失效）---
+    _orig_hit = warning.first_hit
+
+    def late_hit(tbl, p):
+        v = _orig_hit(tbl, p)
+        return None if v is None else int(v) + 100
+
+    results.append(
+        run_case(
+            "W16-M2 命中时刻被推后 100 循环（预警晚于真实失效）",
+            warning,
+            {"attr": "first_hit", "new": late_hit},
+            "有电池的预警晚于真实失效",
+        )
+    )
+
+    # --- W16 变异 3：命中判据永远返回 None（检查会变空）---
+    results.append(
+        run_case(
+            "W16-M3 命中时刻永远算不出来（断言形同虚设）",
+            warning,
+            {"attr": "first_hit", "new": lambda tbl, p: None},
+            "这条断言形同虚设",
+        )
+    )
 
     # --- W15 变异 1：RSS 换成算术平均（合并比单层还窄）---
     _orig_combine = uncertainty.combine
