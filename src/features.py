@@ -149,9 +149,23 @@ def _trailing_residual_std(sub: pd.DataFrame, window: int = TREND_WINDOW) -> flo
 def build_features_one(sub: pd.DataFrame, K: int) -> dict[str, float]:
     """单块电池的前 K 循环特征。**调用方保证传入的 sub 已截断到 cycle ≤ K。**"""
     sub = sub.sort_values("cycle").reset_index(drop=True)
-    if int(sub["cycle"].max()) > K:
-        raise ValueError(f"传入数据超过 K={K}，特征定义被破坏")
+    # 必须**恰好**覆盖到第 K 循环：少了 → 算出来的其实是「K' < K 的特征」，
+    # 但函数名和表头都写着 K，下游没法察觉（对抗输入测试抓到的第三类静默错误；
+    # 实测只给 30 行、K=50 时它会照常返回一组数）。
+    if int(sub["cycle"].max()) != K:
+        raise ValueError(
+            f"特征窗口要求覆盖到第 {K} 循环，实际最大循环是 "
+            f"{int(sub['cycle'].max())}——算出来的不是 K={K} 的特征"
+        )
     cap = sub["capacity_Ah"].to_numpy(float)
+    # 非有限值必须直接报错：`np.polyfit` 遇 NaN 会静默返回 NaN，
+    # 而泄漏检测用 `equal_nan=True` 比较，NaN==NaN 会被判成「没变」——
+    # 整条链路都发现不了。这是对抗输入测试抓到的第二类静默错误。
+    if not np.all(np.isfinite(cap)):
+        raise ValueError(
+            f"特征输入里有 {int((~np.isfinite(cap)).sum())} 个非有限容量值，"
+            "算出来的特征会是 NaN 而不会报错"
+        )
     cap_first = float(cap[0])
     cap_k = float(cap[-1])
     slope, r2 = _linear(sub)

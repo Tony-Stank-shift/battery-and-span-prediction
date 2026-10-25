@@ -92,24 +92,50 @@ DEFINITIONS = (
 # ---------------------------------------------------------------------------
 # 核心：EOL(τ)
 # ---------------------------------------------------------------------------
+def _require_finite(cap, where: str) -> np.ndarray:
+    """容量数组必须是有限值，否则**直接报错**，不许静默算下去。
+
+    为什么要有这条（对抗输入测试抓到的真实洞）：
+    `np.minimum.accumulate` 一旦遇到 NaN，之后的最小值永远是 NaN，
+    于是 `cap[i] < running_min` 全部为 False → 前缀最小点集只剩首点 →
+    `eol_at_exact` 会**静默返回「删失」**。
+
+    实测：cap = [1.8, nan, 1.7, 1.6, 1.5]、τ=1.6 的正确答案是第 4 循环
+    （1.6 ≤ 1.6），而修补前的实现返回 None（= 删失）。
+    这不是崩溃，是**悄悄给错答案**，比崩溃危险得多。
+    真实数据没有 NaN，但函数不该因为「今天没有」就放任。
+    """
+    arr = np.asarray(cap, dtype=float)
+    if arr.size == 0:
+        raise ValueError(f"{where}：容量数组为空")
+    if not np.all(np.isfinite(arr)):
+        bad = int((~np.isfinite(arr)).sum())
+        raise ValueError(
+            f"{where}：容量数组里有 {bad} 个非有限值（NaN/inf）。"
+            "前缀最小值会被污染、EOL 会被静默判成删失；必须先清洗或显式处理"
+        )
+    return arr
+
+
 def cap_series(df: pd.DataFrame) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     """每块电池的 (循环号, 容量) 数组，按循环升序。"""
     out = {}
     for cell, sub in split_by_battery(df).items():
         sub = sub.sort_values("cycle")
         cyc = sub["cycle"].to_numpy(int)
-        cap = sub["capacity_Ah"].to_numpy(float)
+        cap = _require_finite(sub["capacity_Ah"], f"cap_series({cell})")
         # EOL 用「下标 + 1」换算循环号，这个换算只有在循环连续时才成立
         assert (cyc == np.arange(1, len(sub) + 1)).all(), f"{cell} 的循环号不连续"
         out[cell] = (cyc, cap)
     return out
 
 
-def prefix_min_mask(cap: np.ndarray) -> np.ndarray:
+def prefix_min_mask(cap) -> np.ndarray:
     """标记「创下新低」的位置（严格小于之前的最小值，首点算）。
 
     严格小于（而不是 ≤）意味着重复值只保留第一次，这与 EOL 取「首次到达」一致。
     """
+    cap = _require_finite(cap, "prefix_min_mask")
     running = np.minimum.accumulate(cap)
     mask = np.empty(len(cap), dtype=bool)
     mask[0] = True
@@ -117,16 +143,17 @@ def prefix_min_mask(cap: np.ndarray) -> np.ndarray:
     return mask
 
 
-def eol_at(cap: np.ndarray, tau: float) -> int | None:
+def eol_at(cap, tau: float) -> int | None:
     """朴素实现：从头扫，第一个容量 ≤ τ 的循环号；全都不满足返回 None（删失）。
 
     判定口径走 `config.is_at_eol`，不在这里重新写 `<=`（D17）。
     """
+    cap = _require_finite(cap, "eol_at")
     hit = np.flatnonzero(is_at_eol(cap, tau))
     return int(hit[0]) + 1 if len(hit) else None
 
 
-def eol_at_exact(cap: np.ndarray, tau: float) -> int | None:
+def eol_at_exact(cap, tau: float) -> int | None:
     """断点实现：只在前缀最小点里找，复杂度 O(前缀最小点数)。
 
     与前者的关系：任一时刻 EOL 落点必然是前缀最小点，所以两个实现必须给出同一答案。
@@ -137,6 +164,7 @@ def eol_at_exact(cap: np.ndarray, tau: float) -> int | None:
     证明不了「≤/<」的口径对不对——那由 `main()` 里断言 6 的边界检查单独钉住。
     """
     idx = np.flatnonzero(prefix_min_mask(cap))
+    cap = _require_finite(cap, "eol_at_exact")
     hit = is_at_eol(cap[idx], tau)
     if not hit.any():
         return None
@@ -157,9 +185,9 @@ def breakpoints(cap: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return values[order], (idx[order] + 1).astype(int)
 
 
-def censored_below(cap: np.ndarray) -> float:
+def censored_below(cap) -> float:
     """删失边界：τ < min(cap) 时该电池在观察窗口内没有到达 EOL。"""
-    return float(cap.min())
+    return float(_require_finite(cap, "censored_below").min())
 
 
 def eol_or_none(cap: np.ndarray, tau: float) -> int | None:

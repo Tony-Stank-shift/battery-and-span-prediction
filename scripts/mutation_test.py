@@ -56,7 +56,8 @@ def main() -> int:
     import sensitivity
     import features
 
-    _orig_build = features.build_features  # W8 两个变异都以原函数为基底
+    _orig_build = features.build_features  # W8 三个变异都以原函数为基底
+    _orig_cap_series = sensitivity.cap_series  # W7-M4 也要
     results = []
 
     # --- W7 变异 1：EOL 断点实现退回「永远返回首个前缀最小点」---
@@ -154,6 +155,72 @@ def main() -> int:
         )
     )
 
+    # --- W7 变异 4：容量被整体挪动 → 断言 1（跨模块口径核对）必须发现 ---
+    # 守的是「W7 算出的 EOL 与 W3 个体档案一致」这条跨模块约束。
+    def shifted_series(df):
+        out = {}
+        for cell, (cyc, cap) in _orig_cap_series(df).items():
+            out[cell] = (cyc, cap - 0.05)  # 容量整体下移，EOL 会提前
+        return out
+
+    results.append(
+        run_case(
+            "W7-M4 容量序列整体下移 0.05 Ah（跨模块 EOL 不再一致）",
+            sensitivity,
+            {"attr": "cap_series", "new": shifted_series},
+            "与 W3 档案不一致",
+        )
+    )
+
+    # --- W7 变异 5：断点表里的循环号错一格 → 断言 5 必须发现 ---
+    _orig_breakpoints = sensitivity.breakpoints
+
+    def off_by_one_breakpoints(cap):
+        w, c = _orig_breakpoints(cap)
+        return w, (c + 1).astype(int)
+
+    results.append(
+        run_case(
+            "W7-M5 断点表循环号整体 +1（断点表与实测不符）",
+            sensitivity,
+            {"attr": "breakpoints", "new": off_by_one_breakpoints},
+            "处朴素实现不符",
+        )
+    )
+
+    # --- W7 变异 6：某处偷偷改了 config 常量 → 断言 8 的 tripwire 必须响 ---
+    _orig_range_table = sensitivity.range_table
+
+    def mutating_range_table(series):
+        import config as cfg
+
+        cfg.EOL_RATIO = 0.5  # 就是 D17 明令禁止的那种写法
+        return _orig_range_table(series)
+
+    results.append(
+        run_case(
+            "W7-M6 扫描过程顺手改 config.EOL_RATIO（D17 明令禁止）",
+            sensitivity,
+            {"attr": "range_table", "new": mutating_range_table},
+            "扫描过程改动了",
+        )
+    )
+
+    # --- W8 变异 3：特征里混进被禁列名（cycle）→ 白名单断言必须发现 ---
+    def forbidden_col_build(df, K):
+        out = _orig_build(df, K)
+        out["cycle"] = df.groupby("battery_id")["cycle"].max().reindex(out["电池"]).to_numpy()
+        return out
+
+    results.append(
+        run_case(
+            "W8-M3 特征里混进 FEATURE_EXCLUDE 里的 cycle",
+            features,
+            {"attr": "build_features", "new": forbidden_col_build},
+            "被禁止作特征的列",
+        )
+    )
+
     print()
     n_ok = sum(results)
     print(f"{n_ok}/{len(results)} 个变异被断言抓住")
@@ -161,6 +228,13 @@ def main() -> int:
         print("有断言抓不住对应错误 —— 必须先修断言，再加功能。")
         return 1
     print("全部变异都被抓住：这些断言不是空的。")
+    print()
+    print("⚠️ 未被变异测试覆盖的断言（不是漏了，是覆盖不了）：")
+    print("  · W7 断言 4「N_EOL 随 τ 单调不增」：这是 EOL 定义本身保证的恒等式——")
+    print("    τ 变大时集合 {c: cap(c) ≤ τ} 只会变大，最小值只会更小。")
+    print("    任何数据、任何实现都违反不了，所以它**没有验证力**，只是回归护栏。")
+    print("  · W7 断言 7「排序集合只有 1 个元素」：守的是**数据性质**（谁先坏），")
+    print("    不是实现；要让它失败必须伪造一份不同的数据，那测的是数据不是代码。")
     return 0
 
 
