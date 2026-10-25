@@ -4,12 +4,12 @@
 
 ---
 
-# 🔖 交接快照（2026-10-24，W11 完成后更新）
+# 🔖 交接快照（2026-10-24，W12 完成后更新）
 
 ## 一句话位置
 
-**W1–W11 已完成，R6 已修完；下一步做 W12（评估框架：LOBOCV + 指标汇总）。**
-远端 `0133709`；W11 的改动尚未提交。
+**W1–W12 已完成；下一步做 W13（模型对比主表，单独审）。**
+远端 `b77d465`；W12 的改动尚未提交。
 
 ## 复现命令（全部已验，退出码 0）
 
@@ -17,7 +17,7 @@
 cd "C:\Users\Tony Huang\SHU\大二\python\battery-health-and-lifespan-prediction"
 $env:PYTHONIOENCODING="utf-8"          # 不加会中文乱码
 python scripts/run_all.py              # 11 步主管线
-python scripts/mutation_test.py        # 18/18：证明断言不是空的
+python scripts/mutation_test.py        # 20/20：证明断言不是空的
 python scripts/adversarial_test.py     # 43/43：证明病态输入不会静默给错答案
 ```
 
@@ -38,7 +38,7 @@ python scripts/adversarial_test.py     # 43/43：证明病态输入不会静默�
 | `src/regeneration.py` | W6 容量再生 + 共模分解 | `fig04`、`regeneration_events.md` |
 | `src/sensitivity.py` | W7 EOL 阈值敏感性（断点集，非网格） | `fig05`、`eol_threshold_sensitivity.md`、`eol_breakpoints.csv` |
 | `src/features.py` | W8 早期特征 + **三臂泄漏检测** | `early_features.md` |
-| `src/evaluate.py` | **W12 前置：时序划分 + 指标 + EOL 误差口径（四模型唯一出处）** | `eval_setup.md` |
+| `src/evaluate.py` | **评测口径唯一出处**：时序划分 + 指标 + EOL 误差 + **任务 B 的 LOBOCV** + 区间指标 + 统一表适配 | `eval_setup.md`、`task_b_lobocv.md`、`fig11` |
 | `src/models_parametric.py` | W9 M1 线性 / M2 双指数 + 可辨识性诊断 + 参数扰动敏感性 | `fig06`、`model_parametric.md` |
 | `src/models_ml.py` | W10 M3 随机森林（**外推失效反例**）+ 深度/树数/去趋势三诊断 | `fig07`、`fig08`、`model_rf.md` |
 | `src/models_gpr.py` | W11 M4 趋势+GPR：两层方差相加 + 后验采样出 EOL 分布 | `fig09`、`fig10`、`model_gpr.md` |
@@ -104,8 +104,8 @@ R5 W8（2h/8m/4l）｜**R6 W9–W10（3h/5m/4l）**——全部修完。
 ```
 W10 M3 随机森林（外推失效反例）   ← 已完成
 W11 M4 趋势 + GPR                 ← 已完成（两层方差 + 后验 EOL 分布）
-W12 评估框架（LOBOCV + 指标汇总；evaluate.py 已有基础）  ← 下一步
-W13 模型对比主表                  ← 单独审
+W12 评估框架（LOBOCV + 指标汇总）  ← 已完成（n=3 → 只能描述，零基准最强）
+W13 模型对比主表                  ← 下一步（**单独审**）
 W14 三层不确定性折算到循环数
 W15 最早可信预警时间（lead time）
 W16 误差放大分析
@@ -121,7 +121,7 @@ W25 收官大检查
 ```
 
 审查：每 2 项一轮；W13 / W18 / W21 各自单独占一轮（D16）。
-**下一轮 R7 = W11+W12**。
+**R7 = W11+W12**（待审）；W13 单独一轮。
 
 ## 时间
 

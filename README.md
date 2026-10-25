@@ -48,12 +48,12 @@ python src/individual.py         # 个体差异五维量化（fig03）
 python src/regeneration.py       # 容量再生检测与共模分解（fig04）
 python src/sensitivity.py        # EOL 阈值敏感性（fig05 + 断点表）
 python src/features.py           # 早期特征 + 未来信息泄漏证明
-python src/evaluate.py           # 评测口径（时序划分 / 指标 / EOL 误差）
+python src/evaluate.py           # 评测口径 + 任务 B 的 LOBOCV（fig11）
 python src/models_parametric.py  # M1 线性 / M2 双指数（fig06）
 python src/models_ml.py          # M3 随机森林：外推失效（fig07/fig08）
 python src/models_gpr.py         # M4 趋势 + GPR：EOL 后验分布（fig09/fig10）
 
-python scripts/mutation_test.py  # 只查「断言是不是空的」：18 个注入错误必须全部被抓
+python scripts/mutation_test.py  # 只查「断言是不是空的」：20 个注入错误必须全部被抓
 python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/单点/空表…）不许静默给错答案
 ```
 
@@ -107,11 +107,12 @@ src/          已建：config / load_data / sanity_check / preprocess / figures 
               models_gpr
               计划中：uncertainty（三层不确定性折算）/ 图表统一（W19）
 scripts/      run_all.py 一键重跑（当前 11 步，W20 扩展为完整管线）；
-              mutation_test.py 变异测试（18 条）；adversarial_test.py 病态输入测试（43 条）
+              mutation_test.py 变异测试（20 条）；adversarial_test.py 病态输入测试（43 条）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
-              figures/fig01–fig10；tables/data_cleaning_decisions.md, individual_differences.md,
+              figures/fig01–fig11；tables/data_cleaning_decisions.md, individual_differences.md,
               regeneration_events.md, eol_threshold_sensitivity.md, eol_breakpoints.csv,
-              early_features.md, eval_setup.md, model_parametric.md, model_rf.md, model_gpr.md
+              early_features.md, eval_setup.md, model_parametric.md, model_rf.md, model_gpr.md,
+              task_b_lobocv.md
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
 data/raw/     课程下发的 636 行数据

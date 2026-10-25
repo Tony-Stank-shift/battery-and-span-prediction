@@ -3,7 +3,8 @@
 一个从不失败的断言等于没有断言。做法是手工注入已知错误，
 看对应的断言是否**按预期炸掉**。每次注入都必须让管线以非零退出码结束。
 
-当前 **18 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + 一条回归用例（W8-R1）。
+当前 **20 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + W12 两条 +
+一条回归用例（W8-R1）。
 
 它真的抓到过东西（不只是验证代码）：
 1. 最初我给 W8 写的变异是「把 trailing 滚动窗口换成居中窗口」，预期泄漏检测会炸——
@@ -15,7 +16,7 @@
 
 用法
 ----
-    python scripts/mutation_test.py      # 18/18 通过才说明这些断言不是空的
+    python scripts/mutation_test.py      # 20/20 通过才说明这些断言不是空的
 """
 
 from __future__ import annotations
@@ -42,7 +43,8 @@ def run_case(name: str, target, mutate, expect_in: str) -> bool:
         ok = expect_in in msg
         print(f"[{'PASS' if ok else 'FAIL'}] {name}")
         print(f"        期望信息含 {expect_in!r}")
-        print(f"        实际信息：{msg.splitlines()[0][:110]}")
+        lines = msg.splitlines()
+        print(f"        实际信息：{lines[0][:110] if lines else '(空消息——断言没写说明)'}")
         return ok
     except Exception as exc:  # 不是断言失败，说明变异打在别处
         print(f"[FAIL] {name}：抛出的是 {type(exc).__name__} 而不是 AssertionError")
@@ -58,6 +60,7 @@ def run_case(name: str, target, mutate, expect_in: str) -> bool:
 def main() -> int:
     import sensitivity
     import features
+    import evaluate
     import models_ml
     import models_parametric
     import models_gpr
@@ -332,6 +335,40 @@ def main() -> int:
         )
     )
 
+
+    # --- W12 变异 1：LOBOCV 的折里混进被留出的个体（数据泄漏的典型形态）---
+    def overlapping_folds(labels):
+        ids = list(labels.index)
+        return [(ids, hold) for hold in ids]
+
+    results.append(
+        run_case(
+            "W12-M1 LOBOCV 训练集里混进被留出的个体",
+            evaluate,
+            {"attr": "lobocv_folds", "new": overlapping_folds},
+            "折构造不对",
+        )
+    )
+
+    # --- W12 变异 2：统一表静默补 NaN，而不是报错 ---
+    def filling_schema(name, tbl):
+        import numpy as np
+
+        out = tbl.copy()
+        for c in evaluate.COMMON_COLUMNS:
+            if c not in out.columns:
+                out[c] = np.nan
+        out["模型"] = name
+        return out
+
+    results.append(
+        run_case(
+            "W12-M2 统一表缺列时静默补 NaN（掩盖列名分叉）",
+            evaluate,
+            {"attr": "to_common_schema", "new": filling_schema},
+            "没有报错",
+        )
+    )
 
     # --- W11 变异 1：把「趋势参数方差」从带宽里去掉，只留残差方差 ---
     # 这是 M4 存在理由的反面：去掉以后带宽不再随距离张开，

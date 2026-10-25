@@ -175,6 +175,214 @@ def eol_error(pred: int | None, true: int | None, n_obs: int) -> dict:
 
 
 # ---------------------------------------------------------------------------
+# 任务 B：留一电池交叉验证（LOBOCV）—— 以及它在本数据上为什么只能"描述"
+# ---------------------------------------------------------------------------
+"""任务 B（跨个体早期预测）的样本单位是**个体**，所以这里才用 LOBOCV。
+
+⚠️ 本数据只有 4 块电池，其中 B0007 删失没有寿命标签 → **可用 n = 3**。
+于是每一折的训练集只有 **2 个样本**。这不是能靠"好好调参"解决的问题，
+而是研究设计的硬约束。W12 的任务不是硬凑一个排名，而是**把这个约束量化出来**。
+"""
+
+
+def lobocv_folds(labels: pd.Series) -> list[tuple[list[str], str]]:
+    """留一个体：返回 [(训练个体列表, 被留出的个体), ...]，按标签索引顺序。
+
+    断言：每个个体恰好被留出一次；训练集不含被留出的那个；训练集非空。
+    """
+    ids = list(labels.index)
+    if len(ids) < 3:
+        raise ValueError(f"LOBOCV 至少需要 3 个有标签的个体，收到 {len(ids)}")
+    folds = [([i for i in ids if i != hold], hold) for hold in ids]
+    held = [h for _, h in folds]
+    assert sorted(held) == sorted(ids), "有折重复或漏掉了个体"
+    for train, hold in folds:
+        assert hold not in train, "训练集里混进了被留出的个体"
+        assert len(train) == len(ids) - 1, "训练集大小不对"
+        assert len(train) > 0, "训练集为空"
+    return folds
+
+
+def linear_2pt(x_train: np.ndarray, y_train: np.ndarray):
+    """两点线性拟合。**训练残差恒为 0**（两点确定一条直线），这是恒等式不是优点。"""
+    x = np.asarray(x_train, float)
+    y = np.asarray(y_train, float)
+    if len(x) != 2:
+        raise ValueError("linear_2pt 只接受 2 个训练点")
+    if abs(x[1] - x[0]) < 1e-15:
+        raise ValueError("两个训练点的自变量完全相同，斜率无定义")
+    b = (y[1] - y[0]) / (x[1] - x[0])
+    a = y[0] - b * x[0]
+    resid = (a + b * x) - y
+    assert np.max(np.abs(resid)) < 1e-12, (
+        f"两点线性拟合的训练残差最大 {np.max(np.abs(resid)):.2e}，不是恒等零——实现错了"
+    )
+    return float(a), float(b)
+
+
+def lobocv_one_feature(
+    feat: pd.DataFrame, labels: pd.Series, feature: str
+) -> list[dict]:
+    """单个特征在 LOBOCV 下逐折的预测与误差。"""
+    rows = []
+    for train, hold in lobocv_folds(labels):
+        y_train = labels.loc[train].to_numpy(float)
+        y_true = float(labels.loc[hold])
+        a, b = linear_2pt(feat.loc[train, feature].to_numpy(float), y_train)
+        pred = a + b * float(feat.loc[hold, feature])
+        rows.append(
+            {
+                "特征": feature,
+                "留出": hold,
+                "斜率": b,
+                "训练点数": len(train),
+                "训练x跨度": float(np.ptp(feat.loc[train, feature].to_numpy(float))),
+                "x外推距离": float(
+                    min(abs(float(feat.loc[hold, feature]) - float(feat.loc[c, feature]))
+                        for c in train)
+                ),
+                "预测": pred,
+                "真值": y_true,
+                "误差": pred - y_true,
+            }
+        )
+    return rows
+
+
+def lobocv_null(labels: pd.Series) -> list[dict]:
+    """零基准：用训练集的寿命均值去预测被留出的那个个体。
+
+    它没有任何"学习"，只有一个数。**任何特征模型赢不了它，就说明模型没用。**
+    """
+    rows = []
+    for train, hold in lobocv_folds(labels):
+        y_train = labels.loc[train].to_numpy(float)
+        y_true = float(labels.loc[hold])
+        pred = float(y_train.mean())
+        rows.append(
+            {
+                "特征": "零基准（训练均值）",
+                "留出": hold,
+                "斜率": 0.0,
+                "训练点数": len(train),
+                "预测": pred,
+                "真值": y_true,
+                "误差": pred - y_true,
+            }
+        )
+    return rows
+
+
+# ---------------------------------------------------------------------------
+# 指标汇总：区间类指标 + 跨模型统一表
+# ---------------------------------------------------------------------------
+def coverage(y_true, lo, hi) -> float:
+    """PICP：真值落在 [lo, hi] 内的比例。"""
+    y_true = np.asarray(y_true, float)
+    lo = np.asarray(lo, float)
+    hi = np.asarray(hi, float)
+    if not (y_true.shape == lo.shape == hi.shape):
+        raise ValueError("coverage 的三个输入形状必须一致")
+    if np.any(hi < lo):
+        raise ValueError("区间上界小于下界")
+    return float(np.mean((y_true >= lo) & (y_true <= hi)))
+
+
+def mpiw(lo, hi) -> float:
+    """MPIW：平均区间宽度。**必须与 coverage 一起报**——只报宽度会被"宽区间"骗。"""
+    lo = np.asarray(lo, float)
+    hi = np.asarray(hi, float)
+    if np.any(hi < lo):
+        raise ValueError("区间上界小于下界")
+    return float(np.mean(hi - lo))
+
+
+COMMON_COLUMNS: tuple[str, ...] = (
+    "电池", "模型", "M", "训练RMSE", "RMSE", "MAE", "MAPE", "R2",
+    "EOL预测", "EOL真值", "EOL误差",
+)
+"""四个模型的表合并成"对比主表"时必须有的列。W13 就靠它来拼。
+
+列名必须一致，否则合并时会出现两列同义不同名（比如 `RMSE` 与 `测试RMSE`），
+然后 `mean(axis=1)` 静默算错。所以这里用断言把"缺列"变成硬错误。
+"""
+
+
+def to_common_schema(model_name: str, tbl: pd.DataFrame) -> pd.DataFrame:
+    """把某个模型的输出表规范成统一列序：公共列在前，模型特有列在后。
+
+    缺任何一列都直接报错——**不许静默补 NaN**。
+    """
+    missing = [c for c in COMMON_COLUMNS if c not in tbl.columns]
+    if missing:
+        raise ValueError(
+            f"{model_name} 的表缺少公共列 {missing}；"
+            f"现有列：{list(tbl.columns)}"
+        )
+    extra = [c for c in tbl.columns if c not in COMMON_COLUMNS]
+    out = tbl.loc[:, list(COMMON_COLUMNS) + extra].copy()
+    out["模型"] = model_name
+    return out
+
+
+# ---------------------------------------------------------------------------
+# 自检：新加的框架函数是否真的会失败
+# ---------------------------------------------------------------------------
+def self_test_framework() -> None:
+    """钉住 LOBOCV、区间指标与统一表的**行为**（不是恒真检查）。"""
+    labels = pd.Series({"A": 100.0, "B": 110.0, "C": 130.0})
+    folds = lobocv_folds(labels)
+    assert len(folds) == 3, f"3 个个体应得 3 折，实际 {len(folds)}"
+    assert sorted(h for _, h in folds) == ["A", "B", "C"], "折的覆盖不对"
+    for train, hold in folds:
+        assert hold not in train and len(train) == len(labels) - 1, (
+            f"折构造不对：训练集 {train}，留出 {hold}"
+        )
+
+    # 两点线性拟合：训练残差恒为 0 —— 这是恒等式，不是「拟合得好」
+    a, b = linear_2pt(np.array([1.0, 3.0]), np.array([10.0, 20.0]))
+    assert abs(a - 5.0) < 1e-12 and abs(b - 5.0) < 1e-12, (a, b)
+    assert abs((a + b * 1.0) - 10.0) < 1e-12
+    assert abs((a + b * 3.0) - 20.0) < 1e-12
+
+    # 两个训练点 x 完全相同时必须报错（否则斜率是 0/0）
+    try:
+        linear_2pt(np.array([2.0, 2.0]), np.array([1.0, 5.0]))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("两点 x 相同时 linear_2pt 没有报错")
+
+    # 零基准的预测必须等于训练均值
+    for row in lobocv_null(labels):
+        others = [v for k, v in labels.items() if k != row["留出"]]
+        assert abs(row["预测"] - float(np.mean(others))) < 1e-12, row
+
+    # 区间指标：覆盖率与平均宽度
+    assert coverage([1, 2, 3], [0, 1, 2], [2, 3, 4]) == 1.0
+    assert coverage([1, 5], [0, 0], [2, 2]) == 0.5
+    assert abs(mpiw([0, 0], [2, 4]) - 3.0) < 1e-12
+    try:
+        coverage([1], [3], [2])
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("上界小于下界时 coverage 没有报错")
+
+    # 统一表：缺列必须报错，不许静默补 NaN
+    good = pd.DataFrame({c: [1] for c in COMMON_COLUMNS})
+    out = to_common_schema("X", good)
+    assert out["模型"].iloc[0] == "X"
+    bad = good.drop(columns=["EOL误差"])
+    try:
+        to_common_schema("X", bad)
+    except ValueError as exc:
+        assert "EOL误差" in str(exc), exc
+    else:
+        raise AssertionError("缺 EOL误差 列时 to_common_schema 没有报错")
+
+
+# ---------------------------------------------------------------------------
 # 自检：切分与指标本身对不对
 # ---------------------------------------------------------------------------
 def self_test(series: dict[str, pd.DataFrame]) -> None:
@@ -282,7 +490,238 @@ def main() -> int:
     )
     print()
     print(f"评测口径已写出：{out.name}")
+
+    return task_b_main(df, prof)
+
+
+# ---------------------------------------------------------------------------
+# 任务 B 的主流程：LOBOCV + 零基准 + 结论
+# ---------------------------------------------------------------------------
+def task_b_main(df: pd.DataFrame, prof: pd.DataFrame) -> int:
+    """跑任务 B 的 LOBOCV，并把「为什么只能描述、不能排名」写成产物。"""
+    import features  # 延迟导入：features 不依赖 evaluate，放这里有向无环
+
+    self_test_framework()
+
+    feat = features.build_features(df, features.K_MAIN).set_index("电池")
+    prof_idx = prof.set_index("battery_id")["eol_cycle"]
+    labels_all = prof_idx.reindex(feat.index)
+    labels = labels_all.dropna()
+    censored = labels_all[labels_all.isna()].index.tolist()
+
+    record_rows = lobocv_null(labels)
+    for f in features.SCHEMA:
+        record_rows += lobocv_one_feature(feat, labels, f)
+    long = pd.DataFrame(record_rows)
+
+    summary = (
+        long.groupby("特征")
+        .agg(
+            平均绝对误差=("误差", lambda s: float(np.mean(np.abs(s)))),
+            最大绝对误差=("误差", lambda s: float(np.max(np.abs(s)))),
+            平均斜率=("斜率", "mean"),
+        )
+        .reset_index()
+        .sort_values("平均绝对误差")
+        .reset_index(drop=True)
+    )
+
+    null_mae = float(summary.loc[summary["特征"] == "零基准（训练均值）",
+                                "平均绝对误差"].iloc[0])
+    feat_summary = summary[summary["特征"] != "零基准（训练均值）"]
+    best_mae = float(feat_summary["平均绝对误差"].min())
+    best_feat = str(feat_summary.loc[feat_summary["平均绝对误差"].idxmin(), "特征"])
+
+    worst = long.loc[long["误差"].abs().idxmax()]
+    worst_feat = str(worst["特征"])
+    print()
+    print(f"任务 B（跨个体早期预测）：n = {len(labels)} 个有标签个体"
+          f"（删失：{'、'.join(censored) or '无'}），LOBOCV {len(lobocv_folds(labels))} 折，"
+          f"每折训练样本 = {len(labels) - 1}")
+    print(summary.round(2).to_string(index=False))
+
+    # --- 硬断言：结论必须靠数据站住 ---
+    assert null_mae < best_mae, (
+        f"零基准（{null_mae:.1f} 循环）竟然不优于最好的特征模型 "
+        f"（{best_feat}，{best_mae:.1f}）——「特征模型不如零基准」这句话不成立，报告要重写"
+    )
+    assert float(feat_summary["最大绝对误差"].max()) > 10 * null_mae, (
+        "没有任何特征出现灾难性外推（>10 倍零基准误差）——第四节的近共线解释要重写"
+    )
+
+    fig_path = fig11_lobocv(feat, labels, long, summary, worst_feat)
+    md = render_task_b_md(
+        labels, censored, long, summary, null_mae, best_feat, best_mae, worst,
+        fig_path, feat,
+    )
+    out = TABLE_DIR / "task_b_lobocv.md"
+    out.write_text(md, encoding="utf-8")
+    print()
+    print(f"任务 B 报告已写出：{out.name}")
+    print(f"已生成 {fig_path.name}  ({fig_path.stat().st_size / 1024:.0f} KB)")
     return 0
+
+
+def fig11_lobocv(feat, labels, long, summary, worst_feat):
+    """两联图：① 各方法的平均绝对误差（对数轴，零基准高亮）；② 最坏那一折的失控外推。"""
+    from config import setup_matplotlib
+    from figures import save
+
+    setup_matplotlib()
+    import matplotlib.pyplot as plt
+
+    fx = feat if feat.index.name == "电池" else feat.set_index("电池")
+    fig, axes = plt.subplots(1, 2, figsize=(15.0, 5.4))
+
+    ax = axes[0]
+    s = summary.iloc[::-1]
+    colors = ["#c0392b" if v == "零基准（训练均值）" else "#5b7db1"
+              for v in s["特征"]]
+    ax.barh(np.arange(len(s)), s["平均绝对误差"], color=colors, height=0.7)
+    ax.set_yticks(np.arange(len(s)))
+    ax.set_yticklabels(s["特征"], fontsize=8)
+    ax.set_xscale("log")
+    ax.set_xlabel("LOBOCV 平均绝对误差（循环，对数轴）")
+    ax.set_title(f"① 谁比「零基准」更准？一个都没有（n={len(labels)}，每折训练 2 个样本）",
+                 fontsize=10)
+    for i, v in enumerate(s["平均绝对误差"]):
+        ax.text(v * 1.05, i, f"{v:.0f}", va="center", fontsize=7.6, color="#333333")
+
+    ax = axes[1]
+    order = ["B0005", "B0006", "B0018"]
+    xs = fx.loc[order, worst_feat].to_numpy(float)
+    ys = labels.reindex(order).to_numpy(float)
+    ax.scatter(xs, ys, s=90, color="#2c3e50", zorder=5, label="有标签的个体")
+    for x, y, c in zip(xs, ys, order):
+        ax.annotate(c, (x, y), textcoords="offset points", xytext=(6, 6), fontsize=9)
+
+    hold = str(long.loc[long["误差"].abs().idxmax(), "留出"])
+    others = [c for c in order if c != hold]
+    a, b = linear_2pt(fx.loc[others, worst_feat].to_numpy(float),
+                      labels.loc[others].to_numpy(float))
+    pad = 0.02 * float(np.ptp(xs))
+    grid = np.linspace(float(xs.min()) - pad, float(xs.max()) + pad, 100)
+    ax.plot(grid, a + b * grid, "--", color="#c0392b", lw=1.6,
+            label=f"留出 {hold} 时用另外 2 点拟合的直线")
+    pred = a + b * float(fx.loc[hold, worst_feat])
+    ax.scatter([fx.loc[hold, worst_feat]], [labels.loc[hold]],
+               s=120, facecolor="none", edgecolor="#c0392b", lw=2, zorder=6,
+               label=f"{hold} 的真值")
+    ax.set_ylim(float(ys.min()) - 15, float(ys.max()) + 15)
+    ax.annotate(
+        f"同一特征下对 {hold} 的预测 = {pred:.0f} 循环（图外）\n"
+        f"训练集这 2 个点的 x 只差 "
+        f"{float(np.ptp(fx.loc[others, worst_feat].to_numpy(float))):.4f}，"
+        f"却要解释 {abs(float(np.diff(labels.loc[others].to_numpy(float))[0])):.0f} 循环的寿命差",
+        xy=(0.02, 0.03), xycoords="axes fraction", fontsize=8,
+        bbox=dict(boxstyle="round,pad=0.3", fc="#fdf2f2", ec="#e6b0b0"),
+    )
+    ax.set_xlabel(worst_feat)
+    ax.set_ylabel("真实寿命（循环）")
+    ax.set_title(
+        f"② 失控的那一折：2 个点 + 近共线的 x = 斜率 "
+        f"{abs(float(long.loc[long['误差'].abs().idxmax(), '斜率'])):.0e}",
+        fontsize=10,
+    )
+    ax.legend(fontsize=8, loc="upper right")
+
+    fig.suptitle(f"图11　任务 B（跨个体早期预测）的 LOBOCV：n={len(labels)} 时只能描述，不能排名",
+                 fontsize=12.5, y=1.0)
+    fig.tight_layout(rect=(0, 0, 1, 0.93))
+    return save(fig, "fig11_lobocv.png")
+
+
+def render_task_b_md(
+    labels, censored, long, summary, null_mae, best_feat, best_mae, worst,
+    fig_path, feat,
+) -> str:
+    feat_summary = summary[summary["特征"] != "零基准（训练均值）"]
+    n = len(labels)
+    folds = lobocv_folds(labels)
+    n_train = len(folds[0][0])
+    worst_err = float(worst["误差"])
+    worst_span = float(worst["训练x跨度"])
+    worst_extra = float(worst["x外推距离"])
+    slope_max = float(feat_summary["平均斜率"].abs().max())
+
+    return "\n".join(
+        [
+            "# 任务 B：跨个体早期预测的 LOBOCV（W12）",
+            "",
+            "> 本文件由 `src/evaluate.py` 自动生成，数字随代码重算，**不要手工编辑**。",
+            "",
+            "## 一、口径：任务 B 与任务 A 是两个问题",
+            "",
+            "- **任务 A**（W9–W11 的 M1–M4）：给一块电池自己的前 M 个循环，外推它自己的后段。"
+            "**逐个体拟合，没有「留一个体」这回事**。",
+            "- **任务 B**（本文件）：只看前 K 个循环的**特征**，预测**这块电池的寿命**。"
+            "样本单位是**个体**，所以这里才用 LOBOCV（留一电池交叉验证）。",
+            "- `cycle` 在任务 B 里**不是**特征（会泄露），10 个特征全部来自 1..K 的窗口内信息。",
+            "",
+            f"- 有寿命标签的个体：**n = {n}**；删失（无标签）的：{'、'.join(censored) or '无'}。",
+            f"- 折数 = {len(folds)}，**每折训练样本 = {n_train}**。",
+            "",
+            "## 二、结果：**没有一个特征模型赢过零基准**",
+            "",
+            summary.round(2).to_markdown(index=False),
+            "",
+            f"零基准（用另外 {n_train} 个个体的寿命均值去猜被留出的那个）平均绝对误差 "
+            f"**{null_mae:.1f}** 循环；最好的单特征模型（{best_feat}）是 **{best_mae:.1f}**，"
+            f"全部 {len(feat_summary)} 个特征都更差。",
+            "",
+            "这不是「特征没用」——**这是 n=3 时任何交叉验证都无法回答的问题**。"
+            f"每折只有 {n_train} 个训练点，一个 2 参数的线性模型刚好用 2 个点解出 2 个参数，"
+            "训练误差**恒等于 0**（`linear_2pt` 里有断言：这是恒等式，不是拟合得好）。"
+            "于是「模型在训练集上完美」在这里没有任何信息量，剩下全是外推运气。",
+            "",
+            "## 三、最坏的那一折：2 个点 + 近共线的 x = 失控",
+            "",
+            f"最坏一行：用 {worst['特征']} 预测 **{worst['留出']}**，"
+            f"预测 {worst['预测']:.0f} 循环、真值 {worst['真值']:.0f}，"
+            f"误差 **{worst_err:+.0f}** 循环。",
+            "",
+            f"- 训练集两个点的 x 只差 **{worst_span:.4f}**"
+            f"（这 2 个点的寿命却差 {abs(float(np.diff(labels.loc[[c for c in labels.index if c != worst['留出']]].to_numpy(float))[0])):.0f} 循环）；",
+            f"- 斜率因此达到 **{worst['斜率']:.1f} 循环/单位特征**"
+            f"（该特征三折的平均斜率是 {float(feat_summary.loc[feat_summary['特征'] == worst['特征'], '平均斜率'].iloc[0]):.1f}）；",
+            f"- 被留出的那个个体 x 又落在训练区间外 **{worst_extra:.4f}**，"
+            "直线一外推就飞了。",
+            "",
+            "这条与 W9 的 M2 是同一个病：**近共线的自变量 + 小样本 = 斜率不可辨识**。"
+            "W9 里那叫「参数不可辨识」，这里叫「外推爆炸」，本质一样。",
+            "",
+            f"![LOBOCV](../figures/{fig_path.name})",
+            "",
+            "## 四、指标框架：这一轮新增了什么",
+            "",
+            "| 组件 | 作用 | 自检 |",
+            "|---|---|---|",
+            "| `lobocv_folds` | 留一个体的折生成，断言每个体恰好留出一次 | 折覆盖 / 训练集不含留出者 |",
+            "| `linear_2pt` | 两点线性拟合，**显式断言训练残差恒为 0** | 恒等式被写成断言 |",
+            "| `lobocv_null` | 零基准（训练均值）——任何模型必须先赢它 | 预测值等于训练均值 |",
+            "| `coverage` / `mpiw` | PICP 覆盖率与平均区间宽度（W17 用） | 全覆盖 / 半覆盖 / 上界下界颠倒报错 |",
+            "| `to_common_schema` | 四个模型的表合并成统一列序 | **缺列直接报错，不许静默补 NaN** |",
+            "",
+            "## 五、结论：任务 B 在这份数据上只能描述",
+            "",
+            f"1. **不给排名**：n={n}、每折训练 {n_train} 个样本，任何排序都是噪声。"
+            "报告里引用「哪个特征最好」时，必须同时给 n。",
+            "2. **不给 p 值当结论**：n=3 时相关系数的可视化区间是 [−1, 1]，"
+            "W8 已经记过这件事（10 个特征 p 全 > 0.20）。",
+            "3. **可以说的是方向**：特征与寿命的**符号**在 W8 里做过描述性记录，"
+            "那只能当假设，等更多电池数据才能验证。",
+            "4. **任务 A 的结论不受影响**：M1–M4 是逐个体拟合，不依赖跨个体的样本量。",
+            "",
+            "## 六、这张表不能怎么读",
+            "",
+            "1. **不能把「零基准最好」读成「机器学习没用」**：它读成的是"
+            "「本数据只有 3 个有标签的个体，不够做跨个体学习」。",
+            "2. **不能拿训练误差证明模型好**：两点拟合的训练误差恒为 0（第三节）。",
+            "3. **不能把 LOBOCV 的误差当置信区间**：3 个数的均值没有方差可言，"
+            "任何 `mean ± std` 在这里都不成立。",
+            "",
+        ]
+    )
 
 
 if __name__ == "__main__":
