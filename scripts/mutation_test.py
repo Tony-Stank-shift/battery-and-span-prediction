@@ -68,6 +68,7 @@ def main() -> int:
     import warning
     import amplification
     import calibration
+    import strategy
     import models_ml
     import models_parametric
     import models_gpr
@@ -343,6 +344,45 @@ def main() -> int:
     )
 
 
+    # --- W19 变异 1：SUM 判据偷懒用 RSS 的半宽（最坏情况退化成乐观估计）---
+    _orig_rep = strategy.replacement_table
+
+    def lazy_sum(budget):
+        out = _orig_rep(budget)
+        mask = out["判据"] == "SUM 下界"
+        # 把 SUM 的替换时刻改成和 RSS 一样
+        for cell, g in budget.set_index("电池").iterrows():
+            out.loc[mask & (out["电池"] == cell), "替换时刻"] = (
+                float(g["点估计"]) - float(g["rss"])
+            )
+        return out
+
+    results.append(
+        run_case(
+            "W19-M1「最坏情况」判据偷懒用 RSS 的半宽（SUM 判决不再保守）",
+            strategy,
+            {"attr": "replacement_table", "new": lazy_sum},
+            "严格递减",
+        )
+    )
+
+    # --- W19 变异 2：稳定时刻没算出来就填观测长度（默认值冒充结论）---
+    _orig_acq = strategy.acquisition_table
+
+    def fake_stable(budget):
+        out = _orig_acq(budget)
+        out["稳定时刻(95%)"] = out["观测长度"]
+        return out
+
+    results.append(
+        run_case(
+            "W19-M2 稳定时刻用观测长度冒充（没算出来也没人发现）",
+            strategy,
+            {"attr": "acquisition_table", "new": fake_stable},
+            "等于观测长度",
+        )
+    )
+
     # --- W18 变异 1：PICP 反号（模拟区间上下界写反的后果）---
     _orig_picp = calibration.picp_table
 
@@ -387,38 +427,35 @@ def main() -> int:
         )
     )
 
-    # --- W17 变异 1：一步容量误差放大 10 倍（放大倍数被压到 1 以下）---
+    # --- W17 变异 1：近场误差被放大 30 倍（「越往外越不准」被抹平）---
     _orig_run_cell = amplification.run_cell
 
-    def fat_short_term(cell, sub, eol_true, m):
+    def flat_growth(cell, sub, eol_true, m):
         rec = _orig_run_cell(cell, sub, eol_true, m)
-        for h in amplification.HORIZONS:
-            rec[f"h{h}_误差(Ah)"] *= 10.0
-            rec[f"h{h}_容量相对误差"] *= 10.0
-            rec[f"h{h}_实测放大"] /= 10.0
+        rec["h1_误差(Ah)"] *= 30.0
+        e_star = rec.get("e(h*)_误差(Ah)", float("nan"))
+        if rec["h1_误差(Ah)"] > 0 and e_star == e_star:  # NaN != NaN
+            rec["增长倍数 e(h*)/e(1)"] = e_star / rec["h1_误差(Ah)"]
         return rec
 
     results.append(
         run_case(
-            "W17-M1 短期容量误差被放大 10 倍（放大倍数落到 1 以下）",
+            "W17-M1 近场误差被放大 30 倍（增长倍数掉到 1 以下）",
             amplification,
-            {"attr": "run_cell", "new": fat_short_term},
-            "大一个量级",
+            {"attr": "run_cell", "new": flat_growth},
+            "没有变大",
         )
     )
 
-    # --- W17 变异 2：EOL 误差被抹成 0（「猜对了」和「不难」混为一谈）---
-    def zero_eol_error(cell, sub, eol_true, m):
-        rec = _orig_run_cell(cell, sub, eol_true, m)
-        rec["EOL误差(循环)"] = 0.0
-        return rec
+    # --- W17 变异 2：理论放大算错（恒等式必须当场炸）---
+    _orig_theory = amplification.theory_amplification
 
     results.append(
         run_case(
-            "W17-M2 把 EOL 误差抹成 0（看起来全对）",
+            "W17-M2 理论放大公式漏掉额定容量（恒等式被破坏）",
             amplification,
-            {"attr": "run_cell", "new": zero_eol_error},
-            "断言形同虚设",
+            {"attr": "theory_amplification", "new": lambda slope, eol: 0.5 / (abs(slope) * eol)},
+            "这是恒等式",
         )
     )
 

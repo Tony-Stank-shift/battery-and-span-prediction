@@ -519,20 +519,17 @@ def render_md(tbl: pd.DataFrame, m: int) -> str:
     return "\n".join(out)
 
 
-def main() -> int:
-    ensure_dirs()
-    raw = load_raw()
-    df = mark_rows(raw)
-    prof = cell_profile(df)
-
+def build_budget(df: pd.DataFrame, prof: pd.DataFrame, m: int) -> pd.DataFrame:
+    """算出三层预算表（不写文件）。供 W19 复用，避免两处各算一遍。"""
     import models_gpr
     import models_parametric
+    import sensitivity
 
     series = {cell: (sub["cycle"].to_numpy(float), sub["capacity_Ah"].to_numpy(float))
               for cell, sub in split_by_battery(df).items()}
 
-    param = models_parametric.run(df, prof, SPLIT_M)
-    gpr = models_gpr.run(df, prof, SPLIT_M)
+    param = models_parametric.run(df, prof, m)
+    gpr = models_gpr.run(df, prof, m)
 
     tbl = pd.DataFrame({"电池": sorted(series)})
     tbl["点估计"] = tbl["电池"].map(
@@ -552,12 +549,20 @@ def main() -> int:
     assert_model_layer_source(tbl)
 
     # 短窗口电池的「完整窗口极差」另算一列：它进 md 的散文，必须由代码生成（R9-08）
-    import sensitivity
-
     for cell in tbl.loc[tbl["定义层口径"].astype(str).str.contains("下端删失"), "电池"]:
         cap = series[cell][1]
         hi = sensitivity.eol_at_exact(cap, EOL_THRESHOLD_AH + TAU_HALF)
         tbl.loc[tbl["电池"] == cell, "定义层完整窗口极差"] = float(len(cap) - hi)
+    return tbl
+
+
+def main() -> int:
+    ensure_dirs()
+    raw = load_raw()
+    df = mark_rows(raw)
+    prof = cell_profile(df)
+
+    tbl = build_budget(df, prof, SPLIT_M)
 
     CSV_OUT.parent.mkdir(parents=True, exist_ok=True)
     tbl.to_csv(CSV_OUT, index=False, encoding="utf-8-sig")
