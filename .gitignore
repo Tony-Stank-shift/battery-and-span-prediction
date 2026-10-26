@@ -21,3 +21,6 @@ desktop.ini
 outputs/_tmp/
 outputs/_cache/
 *.log
+
+# ---- 渲染预览（LibreOffice Kit 临时目录，不进仓库） ----
+.dsh-office-*/
