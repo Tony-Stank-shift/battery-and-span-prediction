@@ -3,8 +3,8 @@
 一个从不失败的断言等于没有断言。做法是手工注入已知错误，
 看对应的断言是否**按预期炸掉**。每次注入都必须让管线以非零退出码结束。
 
-当前 **38 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + W12 两条 +
-W13 五条 + W15 四条 + W16 五条 + W17 两条 + W18 三条 + 一条回归用例（W8-R1）。
+当前 **42 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + W12 两条 +
+W13 五条 + W15 四条 + W16 四条 + W17 两条 + W18 三条 + W19 四条 + 一条回归用例（W8-R1）。
 
 （跑得比早期慢很多：W16 的变异要真跑整条 t* 扫描，单条约 1 分钟。）
 
@@ -18,7 +18,7 @@ W13 五条 + W15 四条 + W16 五条 + W17 两条 + W18 三条 + 一条回归用
 
 用法
 ----
-    python scripts/mutation_test.py      # 33/33 通过才说明这些断言不是空的
+    python scripts/mutation_test.py      # 全部通过才说明这些断言不是空的
 """
 
 from __future__ import annotations
@@ -344,34 +344,33 @@ def main() -> int:
     )
 
 
-    # --- W19 变异 1：SUM 判据偷懒用 RSS 的半宽（最坏情况退化成乐观估计）---
+    # --- W19 的四个变异（签名：replacement_table(budget, eol_hi) /
+    #     acquisition_table(budget, n_obs, rep)）---
     _orig_rep = strategy.replacement_table
+    _orig_acq = strategy.acquisition_table
 
-    def lazy_sum(budget):
-        out = _orig_rep(budget)
-        mask = out["判据"] == "SUM 下界"
-        # 把 SUM 的替换时刻改成和 RSS 一样
-        for cell, g in budget.set_index("电池").iterrows():
-            out.loc[mask & (out["电池"] == cell), "替换时刻"] = (
-                float(g["点估计"]) - float(g["rss"])
-            )
+    def lazy_sum(budget, eol_hi):
+        """SUM 裕度偷懒用 RSS 的裕度（最坏情况退化成乐观估计）。"""
+        out = _orig_rep(budget, eol_hi)
+        mask = out["判据"] == "SUM 裕度"
+        rss_map = out.loc[out["判据"] == "RSS 裕度"].set_index("电池")["裕度(循环)"]
+        out.loc[mask, "裕度(循环)"] = out.loc[mask, "电池"].map(rss_map)
+        out.loc[mask, "替换时刻"] = out.loc[mask, "EOL(τ_hi)"] - out.loc[mask, "裕度(循环)"]
         return out
 
     results.append(
         run_case(
-            "W19-M1「最坏情况」判据偷懒用 RSS 的半宽（SUM 判决不再保守）",
+            "W19-M1「最坏情况」判据偷懒用 RSS 的裕度（SUM 不再保守）",
             strategy,
             {"attr": "replacement_table", "new": lazy_sum},
-            "严格递减",
+            "严格早于 SUM",
         )
     )
 
-    # --- W19 变异 2：稳定时刻没算出来就填观测长度（默认值冒充结论）---
-    _orig_acq = strategy.acquisition_table
-
-    def fake_stable(budget):
-        out = _orig_acq(budget)
-        out["稳定时刻(95%)"] = out["观测长度"]
+    def fake_stable(budget, n_obs, rep):
+        """稳定时刻没算出来就填观测长度（默认值冒充结论）。"""
+        out = _orig_acq(budget, n_obs, rep)
+        out["t*(95%)"] = out["观测长度"]
         return out
 
     results.append(
@@ -380,6 +379,38 @@ def main() -> int:
             strategy,
             {"attr": "acquisition_table", "new": fake_stable},
             "等于观测长度",
+        )
+    )
+
+    def late_sum(budget, eol_hi):
+        """SUM 裕度变成负的：替换时刻被推到真值之后（= 漏检）。"""
+        out = _orig_rep(budget, eol_hi)
+        mask = out["判据"] == "SUM 裕度"
+        out.loc[mask, "替换时刻"] = out.loc[mask, "EOL(τ_hi)"] + 20.0
+        out.loc[mask, "提前量(循环)"] = out.loc[mask, "真值"] - out.loc[mask, "替换时刻"]
+        return out
+
+    results.append(
+        run_case(
+            "W19-M3 SUM 裕度变成负的（替换推到真值之后 = 漏检）",
+            strategy,
+            {"attr": "replacement_table", "new": late_sum},
+            "没按「点估计 > RSS ≥ SUM」排",
+        )
+    )
+
+    def no_truth(budget, eol_hi):
+        """真值被抹掉：第 2 条断言会变空。"""
+        b = budget.copy()
+        b["真值"] = float("nan")
+        return _orig_rep(b, eol_hi)
+
+    results.append(
+        run_case(
+            "W19-M4 真值被抹掉（断言变空）",
+            strategy,
+            {"attr": "replacement_table", "new": no_truth},
+            "断言形同虚设",
         )
     )
 
