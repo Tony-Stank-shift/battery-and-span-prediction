@@ -1,0 +1,139 @@
+{
+  "schemaVersion": 1,
+  "backend": "native",
+  "rasterEngine": "libreoffice",
+  "source": "saved",
+  "inputPath": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\report\\20_题3_黄锦添.pptx",
+  "sourceSha256": "6cfd673f5955e27e48baa33f8b02a98f9a2bb2a7fc8af979ad4fcf4327099b7f",
+  "dpi": 144,
+  "pageCount": 9,
+  "images": [
+    {
+      "index": 1,
+      "page": 1,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-d374ae0db876437e97f2bcbbeca5f02d\\render\\page-0001.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 78545
+    },
+    {
+      "index": 2,
+      "page": 2,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-d374ae0db876437e97f2bcbbeca5f02d\\render\\page-0002.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 288047
+    },
+    {
+      "index": 3,
+      "page": 3,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-d374ae0db876437e97f2bcbbeca5f02d\\render\\page-0003.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 137878
+    },
+    {
+      "index": 4,
+      "page": 4,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-d374ae0db876437e97f2bcbbeca5f02d\\render\\page-0004.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 186954
+    },
+    {
+      "index": 5,
+      "page": 5,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-d374ae0db876437e97f2bcbbeca5f02d\\render\\page-0005.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 269924
+    },
+    {
+      "index": 6,
+      "page": 6,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-d374ae0db876437e97f2bcbbeca5f02d\\render\\page-0006.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 165970
+    },
+    {
+      "index": 7,
+      "page": 7,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-d374ae0db876437e97f2bcbbeca5f02d\\render\\page-0007.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 177416
+    },
+    {
+      "index": 8,
+      "page": 8,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-d374ae0db876437e97f2bcbbeca5f02d\\render\\page-0008.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 154612
+    },
+    {
+      "index": 9,
+      "page": 9,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-d374ae0db876437e97f2bcbbeca5f02d\\render\\page-0009.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 129726
+    }
+  ],
+  "missingFonts": []
+}

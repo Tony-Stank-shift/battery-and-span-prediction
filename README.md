@@ -63,6 +63,9 @@ python src/amplification.py      # 两场景误差放大：容量 vs 寿命（fi
 python src/calibration.py        # 区间校准 PICP/MPIW（fig16）
 python src/strategy.py           # 三条维护策略（fig17）
 
+python scripts/build_ppt.py        # 生成汇报 PPT（9 页，含备注=逐字稿）
+python scripts/check_ppt.py        # PPT 自检：页数/一句话结论/备注/数字
+python scripts/build_script.py     # 由 PPT 备注生成逐字稿 + 时间预算
 python scripts/build_report.py     # 生成 Word 报告（9 章 / 15 图 / 7 表，模板见上级目录）
 python scripts/check_report.py     # 报告自检：结构 + 图表引用 + 8 条数字可追
 

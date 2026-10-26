@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "backend": "native",
+  "rasterEngine": "libreoffice",
+  "source": "saved",
+  "inputPath": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\report\\20_题3_黄锦添.pptx",
+  "sourceSha256": "73051d25b50dfa36f5fdb28ad8fd62426f40d85504d6220ba3ab7e2935eae98b",
+  "dpi": 144,
+  "pageCount": 9,
+  "images": [
+    {
+      "index": 1,
+      "page": 2,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-f94571af092f461c92679f762ea845f6\\r\\page-0001.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 272889
+    },
+    {
+      "index": 2,
+      "page": 3,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-f94571af092f461c92679f762ea845f6\\r\\page-0002.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 131334
+    },
+    {
+      "index": 3,
+      "page": 8,
+      "path": "C:\\Users\\Tony Huang\\SHU\\大二\\python\\battery-health-and-lifespan-prediction\\.dsh-office-f94571af092f461c92679f762ea845f6\\r\\page-0003.png",
+      "width": 1920,
+      "height": 1081,
+      "rectangle": {
+        "x": 0,
+        "y": 0,
+        "width": 1280,
+        "height": 720.0666666666667
+      },
+      "byteLength": 163415
+    }
+  ],
+  "missingFonts": []
+}
