@@ -17,6 +17,22 @@
 
 ## 🧾 每个 W 的重点（结论 / 证据 / 坑 / 遗留）
 
+### W20 · run_all 一键复现
+- **结论**：账本口径「清空 outputs 后一条命令全重建；与提交版本无差异」**已达成**。
+  干净副本（无 `outputs/`）跑 `python scripts/run_all.py --check`：
+  **17 步全过 + `[OK] 产物与提交版本逐字节一致` + EXIT=0**，总耗时 **92.5 s**
+  （W16 占 44.4 s＝48%，因为它是唯一对时间轴反复重拟合的模块）。
+- **证据**：`scripts/manifest.py`（40 个产物：17 图 + 17 表 + 6 CSV）、`MANIFEST.sha256`、
+  `run_all.py --check/--check-only`（不一致返回 **2**，与「某步失败」区分）、
+  `docs/REPRODUCE.md`、`docs/W20_HANDOFF.md`。
+- **坑**：① **清单不能放在 `outputs/` 里**——「清空重建」会把清单自己删掉，实验就不成立；
+  所以放仓库根。② **任何写进 outputs 的耗时/时间戳都会让逐字节一致永远做不到**，
+  所以每步耗时只打印不落盘。③ 清单头必须记 Python/包版本：
+  PNG 字节对 matplotlib 版本敏感，「一致」只承诺同一环境。
+  ④ 改了任何产出 outputs 的模块，就要 `python scripts/manifest.py` 重新生成清单，
+  否则 `--check` 必失败——这是设计，不是 bug。
+- **遗留**：`mutation_test`/`adversarial_test` 不产出数据、不进清单，但改代码后应一起跑。
+
 ### W19 · 维护策略（单独审节点）
 - **结论**：三条可执行判据，全部折算成循环数。
   **S1 替换点**：`替换时刻 = EOL(τ_hi=1.45) − (模型层 m + 数据层 s)`。

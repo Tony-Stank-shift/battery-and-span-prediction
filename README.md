@@ -32,11 +32,15 @@
 
 ```bash
 pip install -r requirements.txt
-python scripts/run_all.py
+python scripts/run_all.py            # 重跑 17 步（约 90 秒）
+python scripts/run_all.py --check    # 重跑 + 与 MANIFEST.sha256 对账
 ```
 
-当前阶段（W1–W16）管线包含 14 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性 → 早期特征与泄漏证明 → 评测口径 → M1/M2 参数模型 → M3 随机森林（外推失效反例）→ M4 趋势+GPR → 四模型对比主表 → 三层不确定性 → 最早可信预警时刻**。
-W20 会扩展成完整管线（… → 校准 → 报告）。
+**复现性**：`MANIFEST.sha256` 记录全部 40 个产物的 SHA256（含生成环境的包版本）。
+清空 `outputs/` 后跑 `--check`，可以证明「重建结果与提交版本逐字节一致」——
+这条在本仓库是**实际验证过的**，不是口号。详见 [docs/REPRODUCE.md](docs/REPRODUCE.md)。
+
+当前管线包含 17 步：**数据体检 → 清洗与预处理 → 退化曲线 → 个体差异五维量化 → 容量再生分解 → EOL 阈值敏感性 → 早期特征与泄漏证明 → 评测口径 → M1/M2 参数模型 → M3 随机森林（外推失效反例）→ M4 趋势+GPR → 四模型对比主表 → 三层不确定性 → 最早可信预警时刻 → 两场景误差放大 → 区间校准 → 维护策略**。
 
 也可以单独跑某一步：
 
@@ -59,7 +63,7 @@ python src/amplification.py      # 两场景误差放大：容量 vs 寿命（fi
 python src/calibration.py        # 区间校准 PICP/MPIW（fig16）
 python src/strategy.py           # 三条维护策略（fig17）
 
-python scripts/mutation_test.py  # 只查「断言是不是空的」：40 个注入错误必须全部被抓
+python scripts/mutation_test.py  # 只查「断言是不是空的」：42 个注入错误必须全部被抓
 python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/单点/空表…）不许静默给错答案
 ```
 
@@ -112,12 +116,14 @@ src/          已建：config / load_data / sanity_check / preprocess / figures 
               regeneration / sensitivity / features / evaluate / models_parametric / models_ml /
               models_gpr / compare / uncertainty / warning / amplification / calibration / strategy
               计划中：无（W20 起是包装与交付）
-scripts/      run_all.py 一键重跑（当前 17 步，W20 扩展为完整管线）；
-              mutation_test.py 变异测试（40 条）；adversarial_test.py 病态输入测试（43 条）
+scripts/      run_all.py 一键重跑（17 步，支持 --check 对账）；
+              manifest.py 产物清单（生成/校验 MANIFEST.sha256）；
+              mutation_test.py 变异测试（42 条）；adversarial_test.py 病态输入（43 条）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
               figures/fig01–fig17；tables/… model_comparison.md, uncertainty_budget.md,
               warning_time.md, error_amplification.md, interval_calibration.md, strategy.md；
               metrics/… 同名 CSV
+MANIFEST.sha256  40 个产物的 SHA256 + 生成环境（放仓库根，供清空重建后对账）
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
 data/raw/     课程下发的 636 行数据
