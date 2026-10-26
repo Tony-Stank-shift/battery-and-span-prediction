@@ -297,7 +297,7 @@ def fig14(scans: dict[str, pd.DataFrame], tstar: pd.DataFrame,
     ax.set_ylim(0, max(ax.get_ylim()[1], 120))
     ax.legend(fontsize=8)
 
-    fig.suptitle("图14　最早可信预警时刻：区间够窄 ≠ 预测可信", fontsize=13, y=1.0)
+    fig.suptitle("最早可信预警时刻：区间够窄 ≠ 预测可信", fontsize=13, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return save(fig, "fig14_warning_time.png")
 

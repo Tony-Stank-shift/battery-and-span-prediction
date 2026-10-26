@@ -427,7 +427,7 @@ def fig06(df: pd.DataFrame, fits: dict, m: int) -> Path:
         ax.set_ylabel("容量 (Ah)")
         ax.legend(fontsize=7.6, loc="lower left", framealpha=0.9)
 
-    fig.suptitle(f"图6　M1 线性 vs M2 双指数：切分点 M={m} 的轨迹外推", fontsize=13, y=0.985)
+    fig.suptitle(f"M1 线性 vs M2 双指数：切分点 M={m} 的轨迹外推", fontsize=13, y=0.985)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
     return save(fig, "fig06_parametric_extrapolation.png")
 

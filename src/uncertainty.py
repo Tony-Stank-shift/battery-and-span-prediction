@@ -335,7 +335,7 @@ def fig13(tbl: pd.DataFrame) -> Path:
                  fontsize=10)
     ax.legend(fontsize=8, loc="lower right")
 
-    fig.suptitle("图13　三层不确定性统一折算成循环数（M = 80）", fontsize=13, y=1.0)
+    fig.suptitle("三层不确定性统一折算成循环数（M = 80）", fontsize=13, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return save(fig, "fig13_uncertainty_budget.png")
 

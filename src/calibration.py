@@ -307,7 +307,7 @@ def fig16(tbl: pd.DataFrame, pooled_tbl: pd.DataFrame) -> Path:
                  fontsize=10)
     ax.legend(fontsize=8)
 
-    fig.suptitle("图16　区间校准：名义覆盖率 vs 实际覆盖率（预测口径，含观测噪声）",
+    fig.suptitle("区间校准：名义覆盖率 vs 实际覆盖率（预测口径，含观测噪声）",
                  fontsize=13, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return save(fig, "fig16_calibration.png")

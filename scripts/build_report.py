@@ -56,14 +56,14 @@ GROUP = "20"
 # 图号 → (文件名, 图题)。顺序即正文出现顺序。
 FIGURES: dict[int, tuple[str, str]] = {
     1: ("fig01_capacity_degradation.png", "四块电池的容量退化轨迹（红色虚线为 τ=1.4 Ah）"),
-    2: ("fig02_individual_differences.png", "个体差异：同一阈值下的寿命分布"),
+    2: ("fig02_individual_differences.png", "个体差异：绝对健康度与相对衰减形状"),
     3: ("fig05_eol_threshold_sensitivity.png", "EOL 阈值敏感性：τ 从 1.25 扫到 1.60 Ah"),
     4: ("fig06_parametric_extrapolation.png", "M1 线性与 M2 双指数的外推"),
     5: ("fig07_rf_extrapolation.png", "M3 随机森林的外推失效（训练段很准，外推是常数）"),
-    6: ("fig08_rf_diagnostics.png", "M3 的训练/测试 R² 与树数量诊断"),
+    6: ("fig08_rf_diagnostics.png", "M3 的三次诊断：加深、加树、去趋势都不改变外推"),
     7: ("fig09_gpr_band.png", "M4 趋势+GPR 的后验均值与 90% 区间"),
     8: ("fig10_eol_posterior.png", "M4 的 EOL 后验分布"),
-    9: ("fig12_model_comparison.png", "四模型对比：点预测差异与配对检验"),
+    9: ("fig12_model_comparison.png", "四模型对比：逐块 RMSE 与 EOL 预测（配对检验见表 3 下文）"),
     10: ("fig11_lobocv.png", "任务 B：留一电池交叉验证（LOBOCV）"),
     11: ("fig13_uncertainty_budget.png", "三层不确定性统一折算成循环数"),
     12: ("fig14_warning_time.png", "最早可信预警时刻 t*：区间够窄 ≠ 预测可信"),
@@ -76,8 +76,12 @@ FIGURES: dict[int, tuple[str, str]] = {
 # ---------------------------------------------------------------------------
 # 工具
 # ---------------------------------------------------------------------------
-def md_table(path: Path, heading_prefix: str) -> list[list[str]]:
-    """从 `outputs/tables/<file>` 里按小节标题取出第一个 markdown 表。"""
+def md_table(path: Path, heading_prefix: str, required: tuple[str, ...] = ()) -> list[list[str]]:
+    """从小节里取 markdown 表；`required` 指定表头必须包含的列名。
+
+    为什么要有 `required`：一个小节下可能有不止一张表（例如「三层各自的数值」里
+    先有一张口径表、再有数值表），只取「第一个」会拿错——R14-03 就是这么错的。
+    """
     text = (OUT / "tables" / path).read_text(encoding="utf-8").splitlines()
     start = None
     for i, line in enumerate(text):
@@ -85,17 +89,36 @@ def md_table(path: Path, heading_prefix: str) -> list[list[str]]:
             start = i
             break
     assert start is not None, f"{path} 里找不到小节「{heading_prefix}」"
-    rows: list[list[str]] = []
+    blocks: list[list[list[str]]] = []
+    cur: list[list[str]] = []
     for line in text[start:]:
-        s = line.strip()
-        if s.startswith("|"):
-            cells = [c.strip() for c in s.strip("|").split("|")]
+        stripped = line.strip()
+        if stripped.startswith("|"):
+            cells = [c.strip() for c in stripped.strip("|").split("|")]
             if all(re.fullmatch(r":?-{2,}:?", c) for c in cells):
                 continue  # 分隔行
-            rows.append(cells)
-        elif rows:
-            break
+            cur.append(cells)
+        elif cur:
+            blocks.append(cur)
+            cur = []
+            if not required:
+                break  # 没有要求时只取第一张，保持旧行为
+    if cur:
+        blocks.append(cur)
+    assert blocks, f"{path} 的「{heading_prefix}」下没有表"
+    rows = max(blocks, key=len) if not required else blocks[0]
+    if required:
+        for b in blocks:
+            if all(any(c in h for h in b[0]) for c in required):
+                rows = b
+                break
     assert len(rows) >= 2, f"{path} 的「{heading_prefix}」表是空的"
+    if required:
+        header = rows[0]
+        missing = [c for c in required if not any(c in h for h in header)]
+        assert not missing, (
+            f"{path} 的「{heading_prefix}」第一张表缺少列 {missing}（表头是 {header}）"
+        )
     return rows
 
 
@@ -114,6 +137,14 @@ def _set_table_borders(table) -> None:
     tblPr.append(borders)
 
 
+HEADER_ZH = {
+    "battery_id": "电池", "n_cycles": "循环数", "cap_first": "首容量", "cap_last": "末容量",
+    "cap_min": "最低容量", "cap_min_cycle": "最低点循环", "cap_max": "最高容量",
+    "fade_pct": "衰减/%", "slope_Ah_per_100": "斜率/(Ah/100圈)",
+    "eol_cycle": "EOL(循环)", "censored": "删失", "n_regen": "再生次数",
+}
+
+
 def add_table(doc, rows: list[list[str]], caption: str) -> None:
     """插入表格 + 表题（表题在上，符合中文报告习惯）。"""
     p = doc.add_paragraph(caption, style="Body Text")
@@ -121,6 +152,10 @@ def add_table(doc, rows: list[list[str]], caption: str) -> None:
     for r in p.runs:
         r.font.size = Pt(9)
         r.bold = True
+    # 表头汉化 + 把 pandas 的 <NA> 换成人话（R14-22）
+    rows = [list(r) for r in rows]
+    rows[0] = [HEADER_ZH.get(c, c) for c in rows[0]]
+    rows = [[("删失" if c == "<NA>" else c) for c in r] for r in rows]
     t = doc.add_table(rows=len(rows), cols=len(rows[0]))
     try:
         t.style = "Table Grid"
@@ -174,15 +209,37 @@ def add_toc(doc) -> None:
     run._r.append(fld_end)
 
 
+_MD_TOKEN = re.compile(r"(\*\*(.+?)\*\*|`(.+?)`)")
+
+
+def _add_md_runs(par, text: str) -> None:
+    """把 **粗体** 与 `等宽` 变成真正的格式，而不是把标记原样印进 Word（R14-06）。"""
+    pos = 0
+    for m in _MD_TOKEN.finditer(text):
+        if m.start() > pos:
+            par.add_run(text[pos:m.start()])
+        if m.group(2) is not None:
+            r = par.add_run(m.group(2))
+            r.bold = True
+        else:
+            r = par.add_run(m.group(3))
+            r.font.name = "Consolas"
+        pos = m.end()
+    if pos < len(text):
+        par.add_run(text[pos:])
+
+
 def body(doc, text: str) -> None:
     """正文段落：首行缩进 2 字符（中文报告常规），10.5pt。"""
-    p = doc.add_paragraph(text, style="Body Text")
+    p = doc.add_paragraph(style="Body Text")
+    _add_md_runs(p, text)
     p.paragraph_format.first_line_indent = Pt(21)
     p.paragraph_format.space_after = Pt(4)
 
 
 def bullet(doc, text: str) -> None:
-    p = doc.add_paragraph(text, style="Body Text")
+    p = doc.add_paragraph(style="Body Text")
+    _add_md_runs(p, text)
     p.paragraph_format.left_indent = Pt(21)
     p.paragraph_format.space_after = Pt(2)
 
@@ -193,6 +250,24 @@ def h1(doc, text: str) -> None:
 
 def h2(doc, text: str) -> None:
     doc.add_heading(text, level=2)
+
+
+def _extract_function(path: Path, name: str) -> str:
+    """从源文件里按名字抽出函数源码（供附录展示，避免手抄走样）。"""
+    lines = path.read_text(encoding="utf-8").splitlines()
+    start = None
+    for i, line in enumerate(lines):
+        if line.startswith(f"def {name}("):
+            start = i
+            break
+    assert start is not None, f"{path.name} 里找不到函数 {name}"
+    end = start + 1
+    while end < len(lines):
+        line = lines[end]
+        if line and not line[0].isspace() and not line.startswith(("def ", ")", "]", "}")):
+            break
+        end += 1
+    return "\n".join(lines[start:min(end, start + 40)])
 
 
 # ---------------------------------------------------------------------------
@@ -224,7 +299,7 @@ def main() -> int:
         "完成了从数据体检、退化建模到不确定性量化的完整链路。四块电池共 636 个循环的记录中"
         "没有缺失与重复，但存在容量再生（最大一次 +0.1519 Ah）与一块电池（B0007）在观测窗口内"
         "从不穿越失效阈值两个特殊情况，前者被单独建模为噪声、后者按删失处理。"
-        "本文比较了线性、双指数、随机森林与趋势+高斯过程四类模型，重点不在谁的均方误差更小，"
+        "本文比较了线性、双指数、随机森林与趋势+高斯过程四类模型；其中随机森林与高斯过程回归基于 scikit-learn，属机器学习方法，线性与双指数是最小二乘拟合，作为对照。重点不在谁的均方误差更小，"
         "而在**结论能不能被相信**：随机森林在训练段 R² 达 0.997 却在测试段跌到负值，"
         "成为「外推失效」的明确反例；线性与趋势+高斯过程在远场的点预测几乎相同，"
         "因为后者在数据之外退化为前者。围绕不确定性，本文把「阈值定义」「模型形式」「数据噪声」"
@@ -237,12 +312,24 @@ def main() -> int:
     # 摘要必须插在「关键词」之前——直接 add_paragraph 会落到文末，
     # 而后面会删掉模板正文，连它一起删掉（第一次就是这么丢的）
     kw = next(para for para in doc.paragraphs if para.text.startswith("关键词："))
-    p = kw.insert_paragraph_before(abstract, style="Body Text")
+    p = kw.insert_paragraph_before(style="Body Text")
+    _add_md_runs(p, abstract)   # 摘要里也有 **粗体**，同样要解析（R14-06）
     p.paragraph_format.first_line_indent = Pt(21)
     kw.runs[0].text = (
         "关键词：锂电池健康管理；剩余寿命预测；高斯过程；不确定性量化；"
         "区间校准；容量再生"
     )
+
+    # ---- H1：模板自带一份旧 TOC（w:sdt），python-docx 的 paragraphs/tables 都看不到它，
+    #      必须直接对 XML 下手；否则成品里会出现两个目录，且 check_report 会被旧域骗成绿灯 ----
+    body_el = doc.element.body
+    ns = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    n_sdt = 0
+    for el in list(body_el):
+        if el.tag == f"{ns}sdt":
+            body_el.remove(el)
+            n_sdt += 1
+    print(f"已删除模板旧目录（w:sdt）：{n_sdt} 个")
 
     # ---- 删掉模板正文（第 33 段起的提示文字），保留样式 ----
     start_body = None
@@ -301,7 +388,8 @@ def main() -> int:
     n_tab += 1
     add_table(doc, rows, f"表 {n_tab}　四块电池的个体档案（EOL 定义：容量首次 ≤ 1.4 Ah）")
     body(doc,
-         "这一条「距阈值 0.0005 Ah」必须写进报告：它意味着**这块电池的寿命结论只靠万分之二的余量成立**，"
+         "这一条「距阈值 0.0005 Ah」必须写进报告：它意味着**这块电池的寿命结论只靠额定的 0.025%"
+         "（万分之二点五）的余量成立**，"
          "阈值只要抬到 1.4005 Ah，它立刻从「未失效」变成「第 166 循环失效」。"
          "后文所有涉及 B0007 的结论都会带上这个限定。")
 
@@ -314,7 +402,8 @@ def main() -> int:
          "而这里的结论是「不需要清洗」。")
     body(doc,
          "真正需要处理的是三类结构性问题：")
-    bullet(doc, "① **容量再生**：四块电池合计检出 12 对再生事件（后一循环容量比前一循环高），"
+    bullet(doc, "① **容量再生**：四块电池合计检出 12 对再生事件（判据是相邻循环回升 **> 0.05 Ah**；"
+                "若只按「比前一循环高」算则有 127 对，阈值把微小抖动滤掉了），"
                 "最大一次回升 +0.1519 Ah。本文不把它当异常点删除，而是作为噪声的一部分"
                 "——因为它在物理上真实存在（电极材料的重新激活），删掉会让模型对「电池会短暂回弹」这件事一无所知。")
     bullet(doc, "② **超额定容量**：B0006 前 7 个循环容量大于额定值（最大 2.0353 Ah），"
@@ -331,13 +420,17 @@ def main() -> int:
     n_fig += 1
     add_figure(doc, 1)
     body(doc,
-         "图 1 是四块电池的容量退化轨迹。肉眼能看出两件事：一是退化不是直线（前期平、后期陡），"
+         "图 1 是四块电池的容量退化轨迹。肉眼能看出两件事：一是退化不是直线，"
+         "但**「后段更陡」只对 B0005 与 B0007 成立**（加速比 1.62 / 1.11），"
+         "B0006 与 B0018 恰好相反（0.51 / 0.52，后段反而更慢）；"
          "二是四块电池的「陡起来」的位置完全不同。这两件事分别对应后文的模型形式选择与个体差异。")
     n_fig += 1
     add_figure(doc, 2)
     body(doc,
-         "图 2 把「同一阈值下四块电池的寿命」并排画出来。个体差异不能只用「寿命差多少」概括，"
-         "本文把差异拆成五个可量化的维度：寿命、退化速率、初始容量、再生强度、曲线弯曲度。")
+         "图 2 把四块电池的**绝对健康度**与**归一化后的衰减形状**并排画出来：前者回答「现在还剩多少」，"
+         "后者回答「衰减得快不快」。四个寿命数字（97 / 109 / 125 / 删失）在表 1 与表 2 里，不在图上。"
+         "个体差异不能只用「寿命差多少」概括，"
+         "本文把差异拆成五个可量化的维度：寿命、退化速率、初始容量、再生强度、曲线弯曲度（表 2）。")
     n_tab += 1
     add_table(doc, md_table(Path("individual_differences.md"), "五维档案"),
               f"表 {n_tab}　个体差异的五维量化")
@@ -353,7 +446,9 @@ def main() -> int:
          "所以这张图不是平滑拟合，而是精确的分段常数函数。结论有两条："
          "**排序稳健**——在四块电池都有确定寿命的 80 个阈值上，寿命排序始终是 "
          "B0018 < B0006 < B0005 < B0007，一次没变；**绝对寿命不稳健**——同一块电池在不同阈值下"
-         "可以差出 30 到 40 个循环。所以「谁先坏」可以说，「坏在第几循环」必须带阈值。")
+         "在 ±0.05 Ah 的窗内差 30–40 个循环；若看整条扫描跨度，B0006 从 τ=1.25 的 149 循环"
+         "到 τ=1.60 的 63 循环，**差 86 个循环**。所以「谁先坏」可以说，"
+         "「坏在第几循环」必须带阈值。")
 
     # ================= 5. 模型 =================
     h1(doc, "5. 模型构建与对比")
@@ -380,7 +475,8 @@ def main() -> int:
     n_fig += 1
     add_figure(doc, 5)
     body(doc,
-         "随机森林在本数据上的表现值得单独写一页：训练段 R² 高达 0.9966–0.9987，"
+         "从本节开始进入机器学习模型。随机森林（scikit-learn 的 RandomForestRegressor，300 棵树）"
+         "在本数据上的表现值得单独写一页（图 5）：训练段 R² 高达 0.9966–0.9987，"
          "看起来是最好的模型；测试段 R² 却跌到 −2.23 到 −3.57，比「直接预测均值」还差。"
          "原因不是过拟合，而是**树模型在训练数据之外只能输出常数**——它无法表达「继续下降」这件事。")
     n_fig += 1
@@ -396,6 +492,7 @@ def main() -> int:
     n_fig += 1
     add_figure(doc, 8)
     body(doc,
+         "另一类机器学习模型是高斯过程回归（scikit-learn 的 GaussianProcessRegressor）。"
          "M4 的做法是：先用最小二乘拟合线性趋势，再把残差交给高斯过程（ConstantKernel × RBF）。"
          "图 7 是后验均值与 90% 区间，图 8 是由后验路径得到的寿命分布。"
          "需要如实说明的是：**在数据之外，高斯过程均值归零，所以 M4 的远场点预测就等于那条趋势线**——"
@@ -407,19 +504,23 @@ def main() -> int:
     add_figure(doc, 9)
     n_tab += 1
     add_table(doc, md_table(Path("model_comparison.md"), "测试段误差"),
-              f"表 {n_tab}　四模型在测试段的表现（M=80）")
+              f"表 {n_tab}　四模型在测试段的 RMSE（单位 Ah，越小越好；切分点为第 80 个循环）")
     body(doc,
          "表 3 是四模型的主表。本文刻意**不用均方误差的排序下结论**，因为四块电池的样本量太小，"
          "排序会随切分点翻转。改用两个独立判据：对每个测试点做逐点符号检验，"
          "再对整块电池做分块自助法求置信区间。结论是："
-         "线性与趋势+高斯过程在绝大多数点上没有显著差异（B0005 除外，见 5.6）；"
-         "双指数在三块电池上显著更差；随机森林在能比较的两块上显著更差。")
+         "线性与趋势+高斯过程在绝大多数点上没有显著差异（**B0005 除外**：ΔMAE −0.0055，"
+         "88 个测试点里 86 个更靠近真值，符号检验 p≈2.5e-23，见图 9）；"
+         "双指数在三块电池上显著更差；随机森林四块里两块显著更差（B0005、B0007），"
+         "另两块是不显著（B0006，p=0.109）与差异可忽略（B0018）。"
+         "「不显著」不等于「一样好」，只是这块样本量不足以分辨。")
 
     h2(doc, "5.6 任务 B：跨个体早期预测")
     n_fig += 1
     add_figure(doc, 10)
     body(doc,
-         "把「用一块电池的早期数据预测它自己的寿命」换成「用三块电池预测第四块」，难度陡增。"
+         "图 10 是任务 B 的留一电池交叉验证结果。把「用一块电池的早期数据预测它自己的寿命」"
+         "换成「用三块电池预测第四块」，难度陡增。"
          "本数据只有 4 块电池，留一交叉验证每折只有 3 块训练、1 块测试，结论只具方向性。"
          "实测：一个连模型都不用的「预测训练集均值」基线（MAE 14.7 循环）优于全部 10 个特征，"
          "最好的特征也只到 26.4 循环。这提醒我们：**在小样本跨个体任务上，先给基线，再谈特征**。")
@@ -430,11 +531,12 @@ def main() -> int:
     n_fig += 1
     add_figure(doc, 11)
     body(doc,
-         "本文把不确定性拆成三层，并统一折算成「循环」这个决策量纲："
+         "图 11 把三层不确定性画在同一量纲上。本文把它拆成三层，统一折算成「循环」这个决策量纲："
          "**定义层**（阈值挪 ±0.05 Ah 造成的寿命差）、**模型形式层**（不同函数形式给出的寿命差）、"
          "**数据层**（噪声与参数估计）。表 4 是三层各自的数值。")
     n_tab += 1
-    add_table(doc, md_table(Path("uncertainty_budget.md"), "三层各自的数值"),
+    add_table(doc, md_table(Path("uncertainty_budget.md"), "三层各自的数值",
+                            required=("定义层半宽", "模型层半极差", "数据层半宽")),
               f"表 {n_tab}　三层不确定性的数值（循环）")
 
     body(doc,
@@ -457,12 +559,15 @@ def main() -> int:
     n_fig += 1
     add_figure(doc, 13)
     body(doc,
-         "对一条直线，寿命误差与穿越点容量误差之间是恒等式：|EOL 误差| ≡ 穿越点容量误差 / |b|。"
+         "图 13 把两个场景的放大摆在同一个坐标系里。对一条直线，寿命误差与穿越点容量误差之间是恒等式："
+         "|EOL 误差| ≡ 穿越点容量误差 / |b|。"
          "所以**在穿越点上比较「实测」与「理论」什么也证明不了**——它必然等于 1。"
-         "真正可检验的是：同一个模型的容量误差，从第 1 个前向步走到真实穿越点放大了 4.1–10.9 倍；"
+         "真正可检验的是：容量误差从第 1 个前向步走到真实穿越点会不会放大。"
+         "有真值的 3 块电池里，**2 块放大 4.1–10.9 倍，B0018 反而缩小到 0.28 倍**"
+         "（它恰好精确命中，是最小的那种「误差」）；"
          "而用整段测试 RMSE 计算时，实测放大与理论放大同量级（0.58–1.23 倍）。"
          "这说明寿命误差基本可以由「容量误差 ÷ 斜率」解释，也就给出了一个能用的换算："
-         "容量差 0.01 Ah ≈ 寿命差 1.4–3.3 循环。")
+         "容量差 0.01 Ah ≈ 寿命差 1.4–3.0 循环（按四块实测训练斜率 |b| ∈ [0.0033, 0.0070] 换算）。")
 
     h2(doc, "6.4 区间校准")
     n_fig += 1
@@ -471,8 +576,10 @@ def main() -> int:
     add_table(doc, md_table(Path("interval_calibration.md"), "主表"),
               f"表 {n_tab}　区间校准：名义覆盖率 vs 实际覆盖率")
     body(doc,
-         "把「90% 区间」拿去检验：名义 90% 的区间实际只覆盖约 63%，整条校准曲线落在对角线下方。"
-         "但**把它当成全局结论会失真**：90% 档上最差的一块电池只有 10%，最好的一块接近 99%。"
+         "把「90% 区间」拿去检验（图 14）：名义 90% 的区间实际只覆盖约 63%，"
+         "整条校准曲线落在对角线下方。"
+         "但**把它当成全局结论会失真**（表 5）：90% 档上最差的一块电池只有 10%，"
+         "最好的一块接近 99%。"
          "进一步分析发现，覆盖率的高低主要由**点预测偏差**决定（块间差 22 倍），"
          "而不是区间宽度（块间只差 1.15 倍）。")
 
@@ -481,11 +588,15 @@ def main() -> int:
     add_figure(doc, 15)
     n_tab += 1
     add_table(doc, md_table(Path("strategy.md"), "S1 替换点怎么定"),
-              f"表 {n_tab}　替换点的三种判据（排程口径）")
+              f"表 {n_tab}　替换点的三种判据（排程口径，提前量与裕度分列）")
     body(doc,
-         "把前面的结果落成一句可执行的话：**替换时刻 = 更严阈值（τ=1.45 Ah）下的穿越点 − 模型/数据裕度**。"
+         "图 15 的左图是替换点、右图是采集量。把前面的结果落成一句可执行的话："
+         "**替换时刻 = 更严阈值（τ=1.45 Ah）下的穿越点 − 模型/数据裕度**。"
          "提前量必须拆成两半：一半是「把失效标准收紧」造成的（不能省），另一半是「不确定性裕度」（可以买小）。"
-         "本数据上，SUM 口径的提前量是真实寿命的 26.3%–41.6%（有真值的 3 块电池）。")
+         "本数据上，SUM 口径的提前量是真实寿命的 26.3%–41.6%（有真值的 3 块电池）。"
+         "表 6 里「W15 SUM 下界」是同项目另一节的产物：它把阈值带宽也算进裕度，"
+         "与本表的「阈值收紧到 1.45」是同一件事的两种算法，两者之差有正有负，"
+         "说明这两种定义层算法**不可互换**；运维取两者中较小的那个。")
     body(doc,
          "另一个必须点明的结论是：对其中一块电池，**等到预测稳定再决策已经来不及**——"
          "它的 t* 晚于建议替换点，在线剩余寿命为负。对这种电池，可执行的结论只有「按更早的观测直接换」。")
@@ -495,14 +606,21 @@ def main() -> int:
     body(doc, "本文的主要发现可以压成五条：")
     bullet(doc, "① **「寿命」不是一个数，而是一个带阈值的区间。** 阈值挪 ±0.05 Ah，"
                 "同一块电池的寿命读数差 30–40 个循环；排序稳健，绝对值不稳健。")
-    bullet(doc, "② **强拟合器在外推任务上会失效，而且失效方式很隐蔽。** "
+    bullet(doc, "② **用不用机器学习不是重点，它在哪里失效才是。** "
+                "两个机器学习模型里，随机森林训练 R² 0.997、测试 R² 为负；"
+                "高斯过程回归虽然给出区间，但点预测在数据之外退化成趋势线。"
+                "可见「上了模型」不等于「有了外推能力」。",
+    )
+    bullet(doc, "③ **强拟合器在外推任务上会失效，而且失效方式很隐蔽。** "
                 "随机森林训练 R² 0.997、测试 R² 为负，增加树数、加深都救不回来，"
                 "因为训练数据之外没有样本。")
-    bullet(doc, "③ **不确定性的最大来源不是噪声。** 三层折算到同一量纲后，"
+    bullet(doc, "④ **不确定性的最大来源不是噪声。** 三层折算到同一量纲后，"
                 "定义层与模型形式层与统计层同量级；而模型形式层的宽度完全由一个已知更差的模型贡献。")
-    bullet(doc, "④ **「区间够窄」不等于「预测可信」。** 90% 名义区间的实际覆盖率只有约 63%，"
-                "且覆盖率主要由点预测偏差决定，收敛更快的是区间宽度而不是点估计。")
-    bullet(doc, "⑤ **维护判据必须把「定义」与「不确定性」分开。** 把阈值带宽当保险卖掉，"
+    bullet(doc, "⑤ **「区间够窄」不等于「预测可信」。** 90% 名义区间的实际覆盖率只有约 63%，"
+                "且覆盖率主要由点预测偏差决定（块间差 22 倍，而区间宽度只差 1.15 倍）。"
+                "至于「什么时候可以相信预测」，16 个（电池 × 档位）格子里只有 4 个「稳定早于命中」，"
+                "9 个落在蒙特卡洛噪声内无法判定——所以本文不把这 4 个升格成普遍结论。")
+    bullet(doc, "⑥ **维护判据必须把「定义」与「不确定性」分开。** 把阈值带宽当保险卖掉，"
                 "会让提前量里有一半来自一个并不保护任何东西的量。")
     body(doc,
          "本文的局限同样要写清：只有 4 块电池，跨个体结论只具方向性；"
@@ -515,7 +633,7 @@ def main() -> int:
 
     # ================= 8. 分工 =================
     h1(doc, "8. 小组成员分工与个人承担")
-    body(doc, "本项目由 20 组个人独立完成，无其他组员。")
+    body(doc, "本项目由 20 组个人独立完成，无其他组员（表 7）。")
     n_tab += 1
     add_table(doc,
               [["成员姓名", "学号", "承担章节 / 模块", "具体工作内容"],
@@ -532,8 +650,25 @@ def main() -> int:
 
     # ================= 9. 附录 =================
     h1(doc, "9. 附录")
-    body(doc, "代码结构：`src/` 下 19 个模块，按「数据 → 模型 → 不确定性 → 策略」分层；"
+    body(doc, f"代码结构：`src/` 下 {len(list((ROOT / 'src').glob('*.py')))} 个模块，"
+              "按「数据 → 模型 → 不确定性 → 策略」分层；"
               "`scripts/` 下有管线入口、产物清单、变异测试与病态输入测试。")
+    body(doc, "一键复现（约 90 秒）：")
+    body(doc, "下面两段是本项目的核心判定逻辑（从源码直接抽取，不是手抄）：")
+    for fname, func in (("config.py", "is_at_eol"), ("models_gpr.py", "eol_paths")):
+        snippet = _extract_function(ROOT / "src" / fname, func)
+        cp = doc.add_paragraph(style="Body Text")
+        cp.paragraph_format.left_indent = Pt(14)
+        cp.paragraph_format.line_spacing = 1.0
+        # 必须按行断：Word 不认 w:t 里的换行符，整段会挤成一行
+        for li, line in enumerate(snippet.split("\n")):
+            run = cp.add_run(line)
+            run.font.name = "Consolas"
+            run.font.size = Pt(7.5)
+            if li < len(snippet.split("\n")) - 1:
+                run.add_break()
+        body(doc, f"（{fname} 中的 {func}）")
+
     body(doc, "一键复现（约 90 秒）：")
     for line in ("pip install -r requirements.txt",
                  "python scripts/run_all.py --check",
@@ -552,6 +687,16 @@ def main() -> int:
          "自检工具：变异测试把「断言换成必然失败的错误实现」，检验断言不是空的；"
          "病态输入测试覆盖缺失值、常数序列、单点、空表等 43 种情况，要求程序要么正确处理、"
          "要么显式报错，不许静默给出错误答案。")
+
+    # ---- L23：加页脚页码（没有页码时，目录的 PAGEREF 无处可对） ----
+    footer = doc.sections[0].footer
+    fp = footer.paragraphs[0]
+    fp.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    run = fp.add_run()
+    f1 = OxmlElement("w:fldChar"); f1.set(qn("w:fldCharType"), "begin")
+    it = OxmlElement("w:instrText"); it.set(qn("xml:space"), "preserve"); it.text = " PAGE "
+    f2 = OxmlElement("w:fldChar"); f2.set(qn("w:fldCharType"), "end")
+    run._r.append(f1); run._r.append(it); run._r.append(f2)
 
     doc.save(str(DOCX))
 

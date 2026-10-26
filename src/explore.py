@@ -178,7 +178,7 @@ def fig01_capacity_degradation(df, prof) -> Path:
         temp_note = f"{df['ambient_temp_C'].iloc[0]:g} °C 恒温"
     else:
         temp_note = f"{temp_nunique} 种温度"
-    ax.set_title(f"图1　四个电池个体的容量退化曲线（{temp_note}）", fontsize=12)
+    ax.set_title(f"四个电池个体的容量退化曲线（{temp_note}）", fontsize=12)
     ys.append(np.array([EOL_THRESHOLD_AH, RATED_CAPACITY_AH]))
     _set_limits(ax, xs, ys, pad_frac=0.05)
     return save(fig, "fig01_capacity_degradation.png")
@@ -280,7 +280,7 @@ def fig02_individual_differences(df, prof) -> Path:
     _set_limits(ax, xs, ys, pad_frac=0.05)
 
     fig.suptitle(
-        "图2　个体差异：绝对健康度 vs 相对衰减形状（(b) 仅用于展示，不得作特征）",
+        "个体差异：绝对健康度 vs 相对衰减形状（(b) 仅用于展示，不得作特征）",
         fontsize=12,
         y=1.02,
     )

@@ -429,7 +429,7 @@ def fig12(tbl: pd.DataFrame, pred: pd.DataFrame, m: int) -> Path:
     )
     ax.legend(fontsize=8, loc="upper left")
 
-    fig.suptitle(f"图12　四模型对比（M = {m}，同一划分、同一套指标）", fontsize=13, y=1.0)
+    fig.suptitle(f"四模型对比（M = {m}，同一划分、同一套指标）", fontsize=13, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return save(fig, "fig12_model_comparison.png")
 

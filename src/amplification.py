@@ -216,7 +216,7 @@ def fig15(tbl: pd.DataFrame) -> Path:
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3, axis="y")
 
-    fig.suptitle("图15　寿命误差 ≈ 容量误差 ÷ 斜率：放大倍数与三个斜率口径", fontsize=13, y=1.0)
+    fig.suptitle("寿命误差 ≈ 容量误差 ÷ 斜率：放大倍数与三个斜率口径", fontsize=13, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return save(fig, "fig15_error_amplification.png")
 

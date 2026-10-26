@@ -543,7 +543,7 @@ def fig07(df: pd.DataFrame, res: dict, m: int) -> Path:
         ax.set_ylabel("容量 (Ah)")
         ax.legend(fontsize=7.4, loc="upper right", framealpha=0.92)
 
-    fig.suptitle(f"图7　M3 随机森林：切分点 M={m}，外推段被压成一条水平线", fontsize=13, y=0.985)
+    fig.suptitle(f"M3 随机森林：切分点 M={m}，外推段被压成一条水平线", fontsize=13, y=0.985)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
     return save(fig, "fig07_rf_extrapolation.png")
 
@@ -607,7 +607,7 @@ def fig08(dep: pd.DataFrame, det: pd.DataFrame, tree: pd.DataFrame, m: int) -> P
     ax.set_title("③ 去趋势后回到直线：外推能力回来了\n（但常数平移可正可负，不保证更好）", fontsize=9.6)
     ax.legend(fontsize=7.8)
 
-    fig.suptitle(f"图8　M3 的三次诊断（M={m}）", fontsize=13, y=1.0)
+    fig.suptitle(f"M3 的三次诊断（M={m}）", fontsize=13, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.91))
     return save(fig, "fig08_rf_diagnostics.png")
 

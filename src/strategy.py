@@ -305,7 +305,7 @@ def fig17(rep: pd.DataFrame, acq: pd.DataFrame) -> Path:
     ax.set_title("② S2：观测到 t* 就够；B0006 的在线剩余寿命为负", fontsize=10)
     ax.legend(fontsize=7.5)
 
-    fig.suptitle("图17　替换点（S1）与采集量（S2）；阈值口径见 S3", fontsize=13, y=1.0)
+    fig.suptitle("替换点（S1）与采集量（S2）；阈值口径见 S3", fontsize=13, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return save(fig, "fig17_strategy.png")
 

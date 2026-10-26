@@ -601,7 +601,7 @@ def fig05(
     ax.set_title("(d) 台阶密度都 >1；把 0.01 网格的点连成线，误差 3–10 循环",
                  fontsize=10.5)
 
-    fig.suptitle("图5　EOL 阈值敏感性：同一个电池，阈值挪 0.1 Ah 寿命差多少",
+    fig.suptitle("EOL 阈值敏感性：阈值从 1.25 扫到 1.60 Ah，寿命差多少",
                  fontsize=13, y=0.985)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
     return save(fig, "fig05_eol_threshold_sensitivity.png")

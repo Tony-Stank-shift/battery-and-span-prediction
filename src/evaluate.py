@@ -653,7 +653,7 @@ def fig11_lobocv(feat, labels, long, summary, worst_feat):
     )
     ax.legend(fontsize=8, loc="upper right")
 
-    fig.suptitle(f"图11　任务 B（跨个体早期预测）的 LOBOCV：n={len(labels)} 时只能描述，不能排名",
+    fig.suptitle(f"任务 B（跨个体早期预测）的 LOBOCV：n={len(labels)} 时只能描述，不能排名",
                  fontsize=12.5, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.93))
     return save(fig, "fig11_lobocv.png")

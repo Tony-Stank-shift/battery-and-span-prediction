@@ -381,7 +381,7 @@ def fig03(tbl: pd.DataFrame) -> Path:
     ax.set_ylabel("循环")
     ax.set_ylim(0, float(tbl["观测循环"].max()) * 1.25)
 
-    fig.suptitle("图3　个体差异五维：差在哪一维、差多少", fontsize=13, y=0.985)
+    fig.suptitle("个体差异五维：差在哪一维、差多少", fontsize=13, y=0.985)
     fig.tight_layout(rect=(0, 0, 1, 0.955))
     return save(fig, "fig03_individual_differences_facets.png")
 

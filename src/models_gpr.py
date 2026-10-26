@@ -586,7 +586,7 @@ def fig09(df: pd.DataFrame, res: dict, m: int) -> Path:
         ax.set_ylabel("容量 (Ah)")
         ax.legend(fontsize=7.0, loc="upper right", framealpha=0.92)
 
-    fig.suptitle(f"图9　M4 趋势 + GPR：点预测≈趋势线，不确定性才是它的产出（M={m}）",
+    fig.suptitle(f"M4 趋势 + GPR：点预测≈趋势线，不确定性才是它的产出（M={m}）",
                  fontsize=13, y=0.985)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     return save(fig, "fig09_gpr_band.png")
@@ -619,7 +619,7 @@ def fig10(df: pd.DataFrame, res: dict, m: int) -> Path:
         ax.set_ylabel("路径数")
         ax.legend(fontsize=8)
 
-    fig.suptitle(f"图10　EOL 的后验分布（M={m}，{N_SAMPLES} 条路径）", fontsize=13, y=0.985)
+    fig.suptitle(f"EOL 的后验分布（M={m}，{N_SAMPLES} 条路径）", fontsize=13, y=0.985)
     fig.tight_layout(rect=(0, 0, 1, 0.95))
     return save(fig, "fig10_eol_posterior.png")
 
