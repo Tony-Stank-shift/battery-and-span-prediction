@@ -80,8 +80,8 @@ WARNING_CSV = METRIC_DIR / "warning_time.csv"
 TAU_HI = round(EOL_THRESHOLD_AH + 0.05, 4)
 """S1 用的「更严阈值」：比正式口径高 0.05 Ah（与 W7/W15 的窗口半宽一致）。"""
 
-RULES = ("点估计", "RSS 裕度", "SUM 裕度")
-"""三种 S1 判据。点估计 = 不减裕度；RSS/SUM = 减掉 m+s 的两种合并口径。"""
+RULES = ("无裕度", "RSS 裕度", "SUM 裕度")
+"""三种 S1 判据。无裕度 = 直接取 EOL(τ_hi)；RSS/SUM = 再减 m+s 的两种合并口径。"""
 
 LEVEL_FOR_S2 = 95
 """S2 用的 t* 档位。选它的理由：80/90% 档的 t* 在 B0006 上反而更晚（110/100），
@@ -101,7 +101,11 @@ def eol_at_tau(series: dict[str, tuple[np.ndarray, np.ndarray]], tau: float) -> 
 def replacement_table(budget: pd.DataFrame, eol_hi: dict[str, float]) -> pd.DataFrame:
     """S1：三种判据下的替换时刻、提前量、浪费比例。
 
-    基准是 `EOL(τ_hi)`（更严阈值下的真实穿越点），裕度只取模型层 + 数据层。
+    **这是「排程」不是「在线预测」**：基准 `EOL(τ_hi)` 用整条序列的穿越点，
+    决策那一刻并不可得。它回答「若事后看，这条规则把更换点排在第几个循环」。
+
+    同时给出 W15 的 SUM 下界作对照：两者之差就是「定义层用原始窗口跨度
+    还是用模型斜率」造成的差，必须显式报出来，不能糊在一起（R13-H02）。
     """
     rows = []
     for _, r in budget.iterrows():
@@ -109,8 +113,9 @@ def replacement_table(budget: pd.DataFrame, eol_hi: dict[str, float]) -> pd.Data
         base = eol_hi[cell]  # 更严阈值下的穿越点（无模型）
         margin_m = float(r["模型层半极差"])
         margin_s = float(r["数据层半宽"])
+        w15_sum = float(r["点估计"]) - float(r["sum"])  # W15 的 SUM 下界（含定义层）
         for rule, half in (
-            ("点估计", 0.0),
+            (RULES[0], 0.0),
             # RSS：只对 m 与 s 做平方和（不含定义层 d——d 走 S3，不进裕度）
             ("RSS 裕度", float(np.hypot(margin_m, margin_s))),
             ("SUM 裕度", margin_m + margin_s),
@@ -132,6 +137,9 @@ def replacement_table(budget: pd.DataFrame, eol_hi: dict[str, float]) -> pd.Data
                     #   阈值平移 = 真值(τ=1.40) − EOL(τ_hi)，属于「定义」；
                     #   裕度 = m + s，属于「不确定性」。
                     "其中阈值平移": (float(r["真值"]) - base) if pd.notna(r["真值"]) else float("nan"),
+                    # W15 口径的 SUM 下界，供对照（差 = 定义层的两种算法之差）
+                    "W15 SUM 下界": w15_sum,
+                    "与 W15 之差": (when - w15_sum) if rule == "SUM 裕度" else float("nan"),
                 }
             )
     return pd.DataFrame(rows)
@@ -149,49 +157,70 @@ def acquisition_table(budget: pd.DataFrame, n_obs: dict[str, int],
         f"W16 产物里的电池集合与数据不一致：{sorted(w['电池'])}"
     )
 
+    margin = {
+        row["电池"]: float(row["模型层半极差"]) + float(row["数据层半宽"])
+        for _, row in budget.iterrows()
+    }
+
     rows = []
     for cell in sorted(budget["电池"]):
         g = w[w["电池"] == cell].set_index("置信度")
         t_star = float(g.loc[LEVEL_FOR_S2, "t*_stable 最小"])
-        sub = rep[(rep["电池"] == cell) & (rep["判据"] == RULES[2])]
-        when = float(sub["替换时刻"].iloc[0]) if len(sub) else float("nan")
+        point_online = float(g.loc[LEVEL_FOR_S2, "点估计@稳定"])
+        when = float(
+            rep[(rep["电池"] == cell) & (rep["判据"] == RULES[2])]["替换时刻"].iloc[0]
+        )
         rows.append(
             {
                 "电池": cell,
                 "观测长度": n_obs[cell],
-                f"t*(95%)": t_star,
+                "t*(95%)": t_star,
                 "t*(80%)": float(g.loc[80, "t*_stable 最小"]),
                 "t*(90%)": float(g.loc[90, "t*_stable 最小"]),
                 "t*(99%)": float(g.loc[99, "t*_stable 最小"]),
                 "可省循环": n_obs[cell] - t_star,
-                "SUM 判据替换时刻": when,
-                "剩余寿命(t* 之后还能用)": when - t_star,
+                # 两个口径必须分开（R13-H01）
+                "在线点估计@t*": point_online,
+                "在线剩余寿命": point_online - margin[cell] - t_star,
+                "SUM 排程点": when,
+                "t* 距排程点": when - t_star,
                 "在噪声内": bool(g.loc[LEVEL_FOR_S2, "在噪声内"]),
             }
         )
     return pd.DataFrame(rows)
 
 
-def assert_strategy(rep: pd.DataFrame, acq: pd.DataFrame, n_obs: dict[str, int]) -> None:
+def assert_strategy(rep: pd.DataFrame, acq: pd.DataFrame, n_obs: dict[str, int],
+                    df: pd.DataFrame, eol_hi: dict[str, float],
+                    budget: pd.DataFrame) -> None:
     """结构检查（写在调用方，变异才抓得到）。**不设无出处的阈值**（D26）。"""
-    # 1. 三种判据的替换时刻必须非增，且「点估计 → RSS」必须严格（裕度 > 0）。
+    # 0. τ_hi 的口径必须钉住：它借自 W7/W15 的窗口半宽，不许随手改
+    assert abs((TAU_HI - EOL_THRESHOLD_AH) - 0.05) < 1e-9, (
+        f"TAU_HI={TAU_HI} 与正式阈值 {EOL_THRESHOLD_AH} 的差不是 0.05"
+    )
+    assert round(TAU_HI - EOL_THRESHOLD_AH, 6) in sensitivity.WINDOW_HALVES, (
+        f"τ_hi 的偏移 {TAU_HI - EOL_THRESHOLD_AH} 不在 W7 的窗口集合 {sensitivity.WINDOW_HALVES} 里"
+    )
+
+    # 1. 三种判据的替换时刻必须非增，且「无裕度 → RSS」必须严格（裕度 > 0）。
     #    「RSS → SUM」只在模型层非零时才严格：m=0 的电池（B0018）两者恰好相等，
     #    所以要求「至少一块电池上 RSS 严格早于 SUM」，否则这条区分是空的。
     n_strict = 0
     for cell, g in rep.groupby("电池"):
         order = [g.loc[g["判据"] == r, "替换时刻"].iloc[0] for r in RULES]
         assert order[0] > order[1] >= order[2] - 1e-9, (
-            f"{cell} 的替换时刻没按「点估计 > RSS ≥ SUM」排：{order}"
+            f"{cell} 的替换时刻没按「无裕度 > RSS ≥ SUM」排：{order}"
         )
         n_strict += int(order[1] > order[2] + 1e-9)
     assert n_strict >= 1, (
         "没有任何一块电池的 RSS 严格早于 SUM——两种合并口径没区分开（或模型层全为 0）"
     )
-    # W19-M1 会打上面那条；这里再钉一条更直接的：SUM 必须严格早于 RSS 的**裕度**
+    # W19-M1 会打上面那条；这里再钉一条更直接的：SUM 的裕度必须严格大于 RSS 的
     assert (rep.loc[rep["判据"] == RULES[2], "裕度(循环)"].to_numpy(float)
             > rep.loc[rep["判据"] == RULES[1], "裕度(循环)"].to_numpy(float)).any(), (
         "SUM 的裕度没有任何一块电池严格大于 RSS 的裕度——最坏情况口径没起作用"
     )
+
     # 2. 有真值时，SUM 判据必须把全部电池换在失效之前（它存在的理由）
     lab = rep[rep["真值"].notna() & (rep["判据"] == RULES[2])]
     assert lab["电池"].nunique() >= 2, "有真值的电池少于 2 块，这条断言形同虚设"
@@ -199,18 +228,35 @@ def assert_strategy(rep: pd.DataFrame, acq: pd.DataFrame, n_obs: dict[str, int])
         f"SUM 判据仍漏检：{lab.loc[lab['提前量(循环)'] <= 0, ['电池']].to_dict('records')}"
     )
 
-    # 3. 观测长度必须等于数据里的真实长度（H-01：上一版用「网格最后一点+10」，少算了 8 个循环）
-    for cell, n in n_obs.items():
+    # 3. 观测长度必须等于数据里的真实长度——**从 df 独立数**，
+    #    不能拿传进 acquisition_table 的那个 dict 自证（R13-H03：那是变量和自己比）
+    real_n = {cell: int(len(sub)) for cell, sub in split_by_battery(df).items()}
+    for cell, n in real_n.items():
         got = int(acq.loc[acq["电池"] == cell, "观测长度"].iloc[0])
         assert got == n, f"{cell} 的观测长度写成 {got}，数据里是 {n}"
 
-    # 4. 至少两块电池的「剩余寿命」为正；为负的必须被 md 点名（H-02）
-    assert (acq["剩余寿命(t* 之后还能用)"] > 0).sum() >= 2, (
-        "剩余寿命为正的电池少于 2 块——S1 与 S2 完全接不上，md 的流程要重写"
-    )
-    # 稳定时刻不能等于观测长度（那是默认值，不是结论）
+    # 4. 两个「还剩多少」的列必须由定义严格成立（不是数值巧合）
+    for _, r in acq.iterrows():
+        assert abs(r["t* 距排程点"] - (r["SUM 排程点"] - r["t*(95%)"])) < 1e-9, (
+            f"{r['电池']} 的「t* 距排程点」与定义不符"
+        )
+
+    # 5. EOL(τ_hi) 的单调性复核：更严的阈值必须更早穿越（有真值时恒成立）
+    for _, r in budget.iterrows():
+        if pd.notna(r["真值"]):
+            assert eol_hi[r["电池"]] < float(r["真值"]), (
+                f"{r['电池']} 的 EOL(τ_hi)={eol_hi[r['电池']]} 不小于真值 {r['真值']}——"
+                "阈值方向或穿越点算法错了"
+            )
+
+    # 6. 稳定时刻不能等于观测长度（那是默认值，不是结论）
     assert (acq["t*(95%)"] < acq["观测长度"]).all(), (
         "有电池的稳定时刻等于观测长度——大概率是没算出来而填了默认值"
+    )
+
+    # 7. 不能是空的：至少两块电池的在线剩余寿命为正
+    assert (acq["在线剩余寿命"] > 0).sum() >= 2, (
+        "在线剩余寿命为正的电池少于 2 块——S1 与 S2 完全接不上，md 的流程要重写"
     )
 
 
@@ -231,7 +277,8 @@ def fig17(rep: pd.DataFrame, acq: pd.DataFrame) -> Path:
             ax.scatter([i], [float(t)], marker="*", s=170, color="#c0392b", zorder=6,
                        label="真实失效" if i == 0 else None)
         else:
-            ax.text(i, 5, "删失\n无真值", ha="center", va="bottom", fontsize=8, color="#8a6d3b")
+            ax.annotate("删失\n无真值", xy=(i, 0), xytext=(i + 0.42, 60), fontsize=8,
+                        color="#8a6d3b", rotation=90, va="center", ha="left")
     ax.set_xticks(np.arange(len(cells)))
     ax.set_xticklabels(cells)
     ax.set_ylabel("建议替换时刻（循环）")
@@ -240,17 +287,23 @@ def fig17(rep: pd.DataFrame, acq: pd.DataFrame) -> Path:
 
     ax = axes[1]
     idx = np.arange(len(cells))
-    ax.bar(idx - 0.2, acq["观测长度"], 0.4, label="真实观测长度", alpha=0.85)
-    ax.bar(idx + 0.2, acq["t*(95%)"], 0.4, label="S2：稳定时刻 t*(95%)", alpha=0.9)
+    ax.bar(idx - 0.27, acq["观测长度"], 0.27, label="真实观测长度", alpha=0.85)
+    ax.bar(idx, acq["t*(95%)"], 0.27, label="S2：稳定时刻 t*(95%)", alpha=0.9)
+    # 在线剩余寿命用打点表示：它已经是「点 + 裕度」的关系，画成柱会重复计数
+    ax.plot(idx + 0.27, acq["在线剩余寿命"], "d", ms=7, color="#c0392b",
+            label="S2：在线剩余寿命（负=等不到）")
     for i, row in acq.reset_index(drop=True).iterrows():
-        if row["剩余寿命(t* 之后还能用)"] <= 0:
-            ax.text(i, max(row["观测长度"], row["t*(95%)"]) * 1.02,
-                    "t* 已过替换点", ha="center", fontsize=7.5, color="#c0392b")
+        if row["在线剩余寿命"] <= 0:
+            ax.annotate("等不到\n（在线剩余为负）",
+                        xy=(i + 0.27, row["在线剩余寿命"]),
+                        xytext=(i + 0.34, max(row["观测长度"], row["t*(95%)"]) * 0.75),
+                        fontsize=7.5, color="#c0392b",
+                        arrowprops=dict(arrowstyle="->", color="#c0392b", lw=1.0))
     ax.set_xticks(idx)
     ax.set_xticklabels(cells)
     ax.set_ylabel("循环数")
-    ax.set_title("② S2 采集量：观测到 t* 就够；B0006 等不到", fontsize=10)
-    ax.legend(fontsize=8)
+    ax.set_title("② S2：观测到 t* 就够；B0006 的在线剩余寿命为负", fontsize=10)
+    ax.legend(fontsize=7.5)
 
     fig.suptitle("图17　替换点（S1）与采集量（S2）；阈值口径见 S3", fontsize=13, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
@@ -258,14 +311,14 @@ def fig17(rep: pd.DataFrame, acq: pd.DataFrame) -> Path:
 
 
 def render_md(rep: pd.DataFrame, acq: pd.DataFrame, budget: pd.DataFrame,
-              n_obs: dict[str, int]) -> str:
+              n_obs: dict[str, int], series: dict[str, tuple[np.ndarray, np.ndarray]]) -> str:
     lab = rep[rep["真值"].notna()]
     sum_lab = lab[lab["判据"] == RULES[2]]
     rss_lab = lab[lab["判据"] == RULES[1]]
     pt_lab = lab[lab["判据"] == RULES[0]]
     missed = pt_lab.loc[pt_lab["提前量(循环)"] < 0, "电池"].tolist()
     zero_margin = pt_lab.loc[pt_lab["提前量(循环)"] == 0, "电池"].tolist()
-    blocked = acq.loc[acq["剩余寿命(t* 之后还能用)"] <= 0, "电池"].tolist()
+    blocked = acq.loc[acq["在线剩余寿命"] <= 0, "电池"].tolist()
     t_lo = float(acq["t*(95%)"].min())
     t_hi = float(acq["t*(95%)"].max())
     save_lo = float(acq["可省循环"].min())
@@ -274,6 +327,7 @@ def render_md(rep: pd.DataFrame, acq: pd.DataFrame, budget: pd.DataFrame,
     short = budget.loc[budget["定义层口径"].astype(str).str.contains("下端删失"), "电池"].tolist()
     long_only = budget.loc[budget["定义层口径"].astype(str).str.contains("完整窗口"), "定义层半宽"]
     b7 = budget.loc[budget["电池"].isin(short)]
+    min_cap = float(sensitivity.censored_below(series[short[0]][1])) if short else float("nan")
     b7_note = (
         f"（{'、'.join(short)} 是 0.0495 Ah 短窗，得 "
         f"{b7['定义层半宽'].min():.0f}，同宽替代下为 20）"
@@ -319,12 +373,14 @@ def render_md(rep: pd.DataFrame, acq: pd.DataFrame, budget: pd.DataFrame,
         "",
         rep_disp.round(2).to_markdown(index=False),
         "",
-        "**代价**（提前换 = 浪费寿命）：",
+        "**代价**（提前换 = 浪费寿命；注意这是**提前量**，不是裕度）：",
         "",
-        f"- SUM 裕度：{sum_lab['提前量(循环)'].min():.1f}–{sum_lab['提前量(循环)'].max():.1f} 循环，"
-        f"相当于真实寿命的 **{sum_lab['提前量比例'].min():.1%}–{sum_lab['提前量比例'].max():.1%}**；",
-        f"- RSS 裕度：{rss_lab['提前量(循环)'].min():.1f}–{rss_lab['提前量(循环)'].max():.1f} 循环，"
-        f"**{rss_lab['提前量比例'].min():.1%}–{rss_lab['提前量比例'].max():.1%}**。",
+        f"- SUM 提前量：{sum_lab['提前量(循环)'].min():.1f}–{sum_lab['提前量(循环)'].max():.1f} 循环，"
+        f"相当于真实寿命的 **{sum_lab['提前量比例'].min():.1%}–{sum_lab['提前量比例'].max():.1%}**；"
+        f"其中裕度本身只有 {sum_lab['裕度(循环)'].min():.1f}–{sum_lab['裕度(循环)'].max():.1f}；",
+        f"- RSS 提前量：{rss_lab['提前量(循环)'].min():.1f}–{rss_lab['提前量(循环)'].max():.1f} 循环，"
+        f"**{rss_lab['提前量比例'].min():.1%}–{rss_lab['提前量比例'].max():.1%}**"
+        f"（裕度 {rss_lab['裕度(循环)'].min():.1f}–{rss_lab['裕度(循环)'].max():.1f}）。",
         "",
         "**这个代价要拆成两半看**（第十二轮审查 H-03 的要害）：",
         "",
@@ -334,31 +390,44 @@ def render_md(rep: pd.DataFrame, acq: pd.DataFrame, budget: pd.DataFrame,
         "| **不确定性裕度** | 模型形式层 m + 数据层 s（SUM 口径直接相加） | 可以买小，代价是漏检风险 |",
         "",
         rep_disp[["电池", "判据", "替换时刻", "真值", "提前量(循环)", "其中阈值平移",
-                  "裕度(循环)"]].round(2).to_markdown(index=False),
+                  "裕度(循环)", "W15 SUM 下界", "与 W15 之差"]].round(2).to_markdown(index=False),
+        "",
+        "**`与 W15 之差` 必须解释**（第十三轮审查 H-02）：W15 的 SUM 下界含定义层 d，"
+        "这里的裕度不含 d，改用「把阈值推到 1.45」来表达同一件事。"
+        "两者的差就是「定义层用原始窗口跨度」与「用模型斜率换算阈值」之差——"
+        "**有正有负，说明两种定义层算法并不可互换**。运维上取更保守的那个（两者较小值）。",
         "",
         "**风险**（滞后换 = 用到失效）：",
         "",
         (
-            "- 点估计判决在 " + "、".join(missed) + " 上**晚于真实失效**——"
-            "不加减裕度的预测就是不够保守；"
+            "- 无裕度判据在 " + "、".join(missed) + " 上**晚于真实失效**；"
             if missed else
-            "- 点估计判决没有晚于失效的电池——但这是这几块电池恰好偏得不多，不是设计使然；"
+            "- 无裕度判据没有晚于失效的电池——这是**构造保证**（EOL(τ_hi) ≤ 真值），"
+            "不是这几块电池恰好偏得不多；"
         ),
         (
-            "- " + "、".join(zero_margin) + " 上点估计**刚好卡在失效点**（提前量 0 循环），"
-            "没有任何余量。"
+            "- " + "、".join(zero_margin) + " 上**刚好卡在失效点**（提前量 0 循环），没有任何余量。"
             if zero_margin else
-            "- 点估计判决没有零余量的电池。"
+            "- 无裕度判据没有零余量的电池。"
         ),
         "",
-        f"**选哪条**：停机代价 ≫ 换电池代价就用 SUM 裕度（最多浪费 "
+        f"**选哪条**：停机代价 ≫ 换电池代价就用 SUM 裕度（有真值的 3 块中最多提前 "
         f"{sum_lab['提前量(循环)'].max():.0f} 个循环）；寿命是稀缺资源就用 RSS。"
+        f"⚠️ B0007 删失、寿命只知下界 >{int(n_obs.get('B0007', 0))}，"
+        f"它的提前量下界是 {n_obs.get('B0007', 0) - sum_lab['替换时刻'].min():.0f} 循环"
+        "（不会比这个更小），不能拿它和另三块的数混在一起取「最多」。"
         "**两条都要求你先把「浪费多少寿命可以接受」写下来**——那是运维决策，不是统计决策。",
         "",
         "## S2 要采集多少数据才敢下结论",
         "",
-        f"**判据**：观测到 W16 的稳定时刻 t*（本表用 {LEVEL_FOR_S2}% 档）之后再报寿命；"
-        "报的是**剩余寿命 = SUM 替换时刻 − t***。",
+        f"**判据**：观测到 W16 的稳定时刻 t*（本表用 {LEVEL_FOR_S2}% 档）之后再报寿命。",
+        "",
+        "表里有两列「还剩多少」，**口径不同，必须分开读**（第十三轮审查的要害）：",
+        "",
+        "| 列 | 定义 | 什么时候能用 |",
+        "|---|---|---|",
+        "| `在线剩余寿命` | W16 的**模型点估计@t\\*** − 裕度 − t\\* | **在线**：t\\* 那一刻真实可得的量 |",
+        "| `t* 距排程点` | S1 的 SUM 排程点 − t\\* | 只能**事后**看：排程点用了整条序列的穿越点 |",
         "",
         acq_disp.to_markdown(index=False),
         "",
@@ -372,15 +441,18 @@ def render_md(rep: pd.DataFrame, acq: pd.DataFrame, budget: pd.DataFrame,
 
     if blocked:
         out += [
-            "**这是本节最要紧的一条**：" + "、".join(blocked) + " 的 t\\* **已经晚于 SUM 判据的替换时刻**，"
-            "剩余寿命为负——**等数据到齐时已经过了该换的时刻**。",
+            "**这是本节最要紧的一条**：" + "、".join(blocked) + " 的**在线剩余寿命为负**——"
+            "即使拿到 t\\* 时的模型预测，减掉裕度后也已经没有剩余。",
             "",
-            "对这几块电池，可执行的结论只有一句：**不要等预测稳定，按当前（还不稳定的）点估计提前换**。"
-            "换句话说，S2 的「等到 t\\* 再报」与 S1 的「保守替换」对它们**互相矛盾**，"
+            "对这几块电池，可执行的结论只有一句：**不要等预测稳定，按更早的观测直接换**。",
+            "S2 的「等到 t\\* 再报」与 S1 的「保守替换」对它们**互相矛盾**——"
             "你必须先选一个：要么接受提前换，要么接受不稳定的预测。",
             "",
         ]
     out += [
+        "⚠️ **不要把 `t\\* 距排程点` 当成剩余寿命**：排程点用的是整条序列的穿越点"
+        "（回测口径），在线拿不到。它只回答「按排程该换的时刻，比我能预测的时刻早还是晚」。",
+        "",
         f"- t* 用的是 {LEVEL_FOR_S2}% 档，这是**判断不是定理**：四档的 t* 并列在表里，"
         "换档位结论会变（B0006 在 80/90/95/99% 是 110/100/100/90）。",
         "- `在噪声内` 为真的电池，t* 的余量 ≤1 循环（W16 的口径），**不能当精确阈值**；"
@@ -421,9 +493,10 @@ def render_md(rep: pd.DataFrame, acq: pd.DataFrame, budget: pd.DataFrame,
         "2. **不能把 SUM 裕度的浪费当「模型不好」**：那是买保险的成本，可以算成钱；",
         "3. **不能省掉「在噪声内」那一列**：t* 的余量常常 ≤1 循环（W16）；",
         "4. **不能跨电池套用同一个 t***：本数据只有 4 块，t* 由曲线形状决定；",
-        f"5. **B0007 的 {'、'.join(short)} 行要单独读**：它删失、最低容量 {sensitivity.censored_below.__doc__ or ''}"
-        "距 1.4 Ah 只有 0.0005 Ah，且模型预测的 159 循环已被观测否定"
-        "（第 168 循环实测仍 1.43 Ah）。",
+        f"5. **{'、'.join(short)} 行要单独读**：它删失，最低容量 "
+        f"{min_cap:.4f} Ah，距 τ={EOL_THRESHOLD_AH:g} 只有 {min_cap - EOL_THRESHOLD_AH:.4f} Ah"
+        f"（额定的 {(min_cap - EOL_THRESHOLD_AH) / 2.0:.3%}）；"
+        "且模型预测的 159 循环已被观测否定（末循环实测仍 >1.4 Ah）。",
         "",
     ]
     return "\n".join(out)
@@ -445,13 +518,13 @@ def main() -> int:
     eol_hi = eol_at_tau(series, TAU_HI)
     rep = replacement_table(budget, eol_hi)
     acq = acquisition_table(budget, n_obs, rep)
-    assert_strategy(rep, acq, n_obs)
+    assert_strategy(rep, acq, n_obs, df, eol_hi, budget)
 
     CSV_OUT.parent.mkdir(parents=True, exist_ok=True)
     pd.concat(
         [rep.assign(表="S1"), acq.assign(表="S2", 判据="—")], ignore_index=True
     ).to_csv(CSV_OUT, index=False, encoding="utf-8-sig")
-    TABLE_MD.write_text(render_md(rep, acq, budget, n_obs), encoding="utf-8")
+    TABLE_MD.write_text(render_md(rep, acq, budget, n_obs, series), encoding="utf-8")
     fig_path = fig17(rep, acq)
 
     print(f"M = {SPLIT_M}；τ_hi = {TAU_HI:g} Ah")

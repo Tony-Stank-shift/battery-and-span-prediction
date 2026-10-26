@@ -378,7 +378,7 @@ def main() -> int:
             "W19-M2 稳定时刻用观测长度冒充（没算出来也没人发现）",
             strategy,
             {"attr": "acquisition_table", "new": fake_stable},
-            "等于观测长度",
+            "与定义不符",
         )
     )
 
@@ -395,7 +395,7 @@ def main() -> int:
             "W19-M3 SUM 裕度变成负的（替换推到真值之后 = 漏检）",
             strategy,
             {"attr": "replacement_table", "new": late_sum},
-            "没按「点估计 > RSS ≥ SUM」排",
+            "没按「无裕度 > RSS ≥ SUM」排",
         )
     )
 
