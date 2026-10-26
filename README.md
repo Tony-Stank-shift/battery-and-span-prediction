@@ -63,6 +63,9 @@ python src/amplification.py      # 两场景误差放大：容量 vs 寿命（fi
 python src/calibration.py        # 区间校准 PICP/MPIW（fig16）
 python src/strategy.py           # 三条维护策略（fig17）
 
+python scripts/build_report.py     # 生成 Word 报告（9 章 / 15 图 / 7 表，模板见上级目录）
+python scripts/check_report.py     # 报告自检：结构 + 图表引用 + 8 条数字可追
+
 python scripts/mutation_test.py  # 只查「断言是不是空的」：42 个注入错误必须全部被抓
 python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/单点/空表…）不许静默给错答案
 ```
