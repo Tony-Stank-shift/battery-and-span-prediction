@@ -57,8 +57,9 @@ python src/uncertainty.py        # 三层不确定性折算成循环数（fig13�
 python src/warning.py            # 最早可信预警时刻 t*（fig14）
 python src/amplification.py      # 两场景误差放大：容量 vs 寿命（fig15）
 python src/calibration.py        # 区间校准 PICP/MPIW（fig16）
+python src/strategy.py           # 三条维护策略（fig17）
 
-python scripts/mutation_test.py  # 只查「断言是不是空的」：38 个注入错误必须全部被抓
+python scripts/mutation_test.py  # 只查「断言是不是空的」：40 个注入错误必须全部被抓
 python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/单点/空表…）不许静默给错答案
 ```
 
@@ -109,13 +110,13 @@ python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/
 ```
 src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual /
               regeneration / sensitivity / features / evaluate / models_parametric / models_ml /
-              models_gpr / compare / uncertainty / warning / amplification / calibration
-              计划中：策略建议（W19）
-scripts/      run_all.py 一键重跑（当前 16 步，W20 扩展为完整管线）；
-              mutation_test.py 变异测试（38 条）；adversarial_test.py 病态输入测试（43 条）
+              models_gpr / compare / uncertainty / warning / amplification / calibration / strategy
+              计划中：无（W20 起是包装与交付）
+scripts/      run_all.py 一键重跑（当前 17 步，W20 扩展为完整管线）；
+              mutation_test.py 变异测试（40 条）；adversarial_test.py 病态输入测试（43 条）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
-              figures/fig01–fig16；tables/… model_comparison.md, uncertainty_budget.md,
-              warning_time.md, error_amplification.md, interval_calibration.md；
+              figures/fig01–fig17；tables/… model_comparison.md, uncertainty_budget.md,
+              warning_time.md, error_amplification.md, interval_calibration.md, strategy.md；
               metrics/… 同名 CSV
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
