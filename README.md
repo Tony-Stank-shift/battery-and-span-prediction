@@ -55,8 +55,9 @@ python src/models_gpr.py         # M4 趋势 + GPR：EOL 后验分布（fig09/fi
 python src/compare.py            # 四模型对比主表（fig12 + 长表 CSV）
 python src/uncertainty.py        # 三层不确定性折算成循环数（fig13）
 python src/warning.py            # 最早可信预警时刻 t*（fig14）
+python src/amplification.py      # 两场景误差放大：容量 vs 寿命（fig15）
 
-python scripts/mutation_test.py  # 只查「断言是不是空的」：31 个注入错误必须全部被抓
+python scripts/mutation_test.py  # 只查「断言是不是空的」：35 个注入错误必须全部被抓
 python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/单点/空表…）不许静默给错答案
 ```
 
@@ -107,13 +108,15 @@ python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/
 ```
 src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual /
               regeneration / sensitivity / features / evaluate / models_parametric / models_ml /
-              models_gpr / compare / uncertainty / warning
+              models_gpr / compare / uncertainty / warning / amplification
               计划中：校准（W18）
-scripts/      run_all.py 一键重跑（当前 14 步，W20 扩展为完整管线）；
-              mutation_test.py 变异测试（31 条）；adversarial_test.py 病态输入测试（43 条）
+scripts/      run_all.py 一键重跑（当前 15 步，W20 扩展为完整管线）；
+              mutation_test.py 变异测试（35 条）；adversarial_test.py 病态输入测试（43 条）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
-              figures/fig01–fig14；tables/… model_comparison.md, uncertainty_budget.md, warning_time.md；
-              metrics/model_comparison.csv, uncertainty_budget.csv, warning_time.csv
+              figures/fig01–fig15；tables/… model_comparison.md, uncertainty_budget.md,
+              warning_time.md, error_amplification.md；
+              metrics/model_comparison.csv, uncertainty_budget.csv, warning_time.csv,
+              error_amplification.csv
 report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
 docs/         项目状态与决策记录
 data/raw/     课程下发的 636 行数据

@@ -263,6 +263,28 @@ def sample_paths(
     return trend_paths + resid_paths
 
 
+def eol_paths(
+    model: dict, n_obs: int, n_samples: int = N_SAMPLES,
+    seed: int = GP_SEED, with_trend_var: bool = True,
+) -> np.ndarray:
+    """每条后验路径各自的寿命（没穿越的路径记 NaN）。
+
+    拆出来是为了让调用方**只采样一次、再按批分组**：
+    后验协方差的分解与样本条数无关（840 维 Cholesky 主导），
+    所以「4 个 300 条的批」用一次 1200 条采样再切分，等价而快约 4 倍。
+    """
+    hi = int(np.ceil(n_obs * EOL_SEARCH_MULTIPLE))
+    grid = np.arange(1, hi + 1, dtype=float)
+    paths = sample_paths(model, grid, n_samples, seed, with_trend_var)
+    hit = is_at_eol(paths)  # (len(grid), S)
+    eols = np.full(paths.shape[1], np.nan)
+    for j in range(paths.shape[1]):
+        idx = np.flatnonzero(hit[:, j])
+        if len(idx):
+            eols[j] = grid[idx[0]]
+    return eols
+
+
 def eol_from_paths(
     model: dict, n_obs: int, n_samples: int = N_SAMPLES,
     seed: int = GP_SEED, with_trend_var: bool = True,
@@ -272,17 +294,7 @@ def eol_from_paths(
     路径在某循环处首次 ≤ τ 即算到达；5N 内都没到则记为**删失路径**（单独计数，
     不能当成一个数字塞进分位数）。
     """
-    hi = int(np.ceil(n_obs * EOL_SEARCH_MULTIPLE))
-    grid = np.arange(1, hi + 1, dtype=float)
-    paths = sample_paths(model, grid, n_samples, seed, with_trend_var)
-
-    hit = is_at_eol(paths)  # (len(grid), S) 布尔
-    eols = np.full(paths.shape[1], np.nan)
-    for j in range(paths.shape[1]):
-        idx = np.flatnonzero(hit[:, j])
-        if len(idx):
-            eols[j] = grid[idx[0]]
-
+    eols = eol_paths(model, n_obs, n_samples, seed, with_trend_var)
     ok = eols[np.isfinite(eols)]
     q = np.percentile(ok, [5, 50, 95]) if len(ok) else np.array([np.nan] * 3)
     return {
@@ -292,7 +304,7 @@ def eol_from_paths(
         "median": float(q[1]),
         "q95": float(q[2]),
         "width90": float(q[2] - q[0]),
-        "n_paths": int(paths.shape[1]),
+        "n_paths": int(len(eols)),
     }
 
 

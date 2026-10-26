@@ -66,6 +66,7 @@ def main() -> int:
     import compare
     import uncertainty
     import warning
+    import amplification
     import models_ml
     import models_parametric
     import models_gpr
@@ -340,6 +341,41 @@ def main() -> int:
         )
     )
 
+
+    # --- W17 变异 1：一步容量误差放大 10 倍（放大倍数被压到 1 以下）---
+    _orig_run_cell = amplification.run_cell
+
+    def fat_short_term(cell, sub, eol_true, m):
+        rec = _orig_run_cell(cell, sub, eol_true, m)
+        for h in amplification.HORIZONS:
+            rec[f"h{h}_误差(Ah)"] *= 10.0
+            rec[f"h{h}_容量相对误差"] *= 10.0
+            rec[f"h{h}_实测放大"] /= 10.0
+        return rec
+
+    results.append(
+        run_case(
+            "W17-M1 短期容量误差被放大 10 倍（放大倍数落到 1 以下）",
+            amplification,
+            {"attr": "run_cell", "new": fat_short_term},
+            "大一个量级",
+        )
+    )
+
+    # --- W17 变异 2：EOL 误差被抹成 0（「猜对了」和「不难」混为一谈）---
+    def zero_eol_error(cell, sub, eol_true, m):
+        rec = _orig_run_cell(cell, sub, eol_true, m)
+        rec["EOL误差(循环)"] = 0.0
+        return rec
+
+    results.append(
+        run_case(
+            "W17-M2 把 EOL 误差抹成 0（看起来全对）",
+            amplification,
+            {"attr": "run_cell", "new": zero_eol_error},
+            "断言形同虚设",
+        )
+    )
 
     # --- W16 变异 1：把区间上下界写反（置信度越高反而越窄）---
     _orig_scan = warning.scan_cell

@@ -68,6 +68,9 @@ LEVELS = (80, 90, 95, 99)
 SEEDS = (RANDOM_SEED, 7, 123, 2024)
 """后验路径的种子。t* 常常只差 0–1 循环，单种子报出去的数不可靠。"""
 
+N_PATHS = 300
+"""每一批的路径条数。四批合起来一次采样（1200 条），所以总成本只算一次协方差分解。"""
+
 SENSITIVE_CYCLES = 1.0
 """余量小于等于这个数（循环）就认为「在蒙特卡洛噪声内」，不下结论。"""
 
@@ -103,9 +106,17 @@ def scan_cell(
     for t0 in grid:
         model = models_gpr.fit_gpr(t_all[:t0], y_all[:t0])
         rec = {"电池": cell, "t0": t0, "点估计": models_gpr.eol_mean(model, n_obs)}
-        for seed in seeds:
-            dist = models_gpr.eol_from_paths(model, n_obs, seed=seed)
-            ok = dist["eol"][np.isfinite(dist["eol"])]
+        # **一次采样、按批切分**：后验协方差的分解与样本条数无关（840 维 Cholesky 主导），
+        # 4 个 300 条的批用一次 1200 条采样再切，等价于 4 个种子而快约 4 倍。
+        eols = models_gpr.eol_paths(
+            model, n_obs, n_samples=N_PATHS * len(seeds), seed=seeds[0]
+        )
+        for k, seed in enumerate(seeds):
+            batch = eols[k * N_PATHS:(k + 1) * N_PATHS]
+            ok = batch[np.isfinite(batch)]
+            assert len(ok) > 0.5 * N_PATHS, (
+                f"{cell} t0={t0} 的第 {k} 批删失路径过多（{N_PATHS - len(ok)}/{N_PATHS}）"
+            )
             for p in LEVELS:
                 lo_q, hi_q = (100 - p) / 2.0, 100 - (100 - p) / 2.0
                 lo, hi = np.percentile(ok, [lo_q, hi_q])
@@ -473,8 +484,11 @@ def main() -> int:
         cell: (None if pd.isna(prof.loc[cell, "eol_cycle"]) else int(prof.loc[cell, "eol_cycle"]))
         for cell in sorted(df["battery_id"].unique())
     }
-    scans = {cell: scan_cell(df, cell) for cell in truth}
-    step5 = {cell: scan_cell(df, cell, step=GRID_STEP_SENSITIVITY) for cell in truth}
+    scans5 = {cell: scan_cell(df, cell, step=GRID_STEP_SENSITIVITY) for cell in truth}
+    # 步长 10 的主口径是步长 5 网格的子集——**扫一次、切两个视图**，别扫两遍
+    mask = lambda t: (t["t0"] % GRID_STEP == 0) & (t["t0"] >= GRID_STEP * GRID_START_FACTOR)
+    scans = {cell: scans5[cell][mask(scans5[cell])].reset_index(drop=True) for cell in truth}
+    step5 = scans5
 
     tstar = add_flags(build_tstar(scans, truth, step5))
     assert_monotone(tstar)
