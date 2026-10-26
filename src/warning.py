@@ -6,29 +6,31 @@
 答这个问题必须先说清「相信」是什么意思，本节给两个都不许混用的定义：
 
 1. **稳定（可部署）**：t*_stable(p) = 最早 t0，使得**此后所有** t0 的 p% 预测区间
-   **有公共交集**。语义：再加数据也不会改主意。它**不需要真值**，所以在真实部署中可算。
+   **有公共交集**。语义：再加数据也不会改主意。
 2. **命中（事后诊断）**：t*_hit(p) = 最早 t0，使得**此后所有** t0 的 p% 区间
-   **都盖住真值**。语义：从此以后预测一直是对的。它**必须知道真值**，只能事后算。
+   **都盖住真值**。语义：从此以后预测一直是对的。它必须知道真值，只能事后算。
 
-**为什么必须分开**：区间变窄 ≠ 预测变准。实测 B0005 在 t0=60 的 95% 区间半宽 24 循环
-（已经小于 W15 的系统不确定性 34.5），可它的点估计是 217 循环、真值 125——
-**误差 92 循环**。如果拿「区间够窄」当可信判据，就会提前 30 多个循环发布一个错得离谱的预警。
-这个差距正是 W18（PICP/MPIW 校准）要检测的东西。
+**为什么必须分开**：区间变窄 ≠ 预测变准。本数据里 B0006 在 80%/90% 档位上
+从某个时刻起区间整体落到真值下方、再没盖住它，而同一时期它的区间宽度还在缩小。
 
-四档置信度 80 / 90 / 95 / 99%：**置信度越高，区间越宽**，因此
-`t*_(80) ≤ t*_(90) ≤ t*_(95) ≤ t*_(99)`——这条单调性由断言钉住（写错分位数就会炸）。
+三件必须写明的口径（都是第七轮审查逼出来的）
+--------------------------------------------
+1. **网格不碰真值**：上界一律 `N − 10`。初版用 `min(N−10, 真值−5)`，等于让「可部署量」
+   偷看真值——放开后 B0006 的 stable 从 40/60/90 变成 90/100/110（95% 档差 60 循环）。
+2. **蒙特卡洛敏感**：EOL 分位数来自 300 条后验路径，`models_gpr` 自己说 MC 误差约 ±1 循环。
+   本节的 t* 余量常常就是 0–1 循环，所以每个格子跑 4 个路径种子，
+   报 min–max，**余量 ≤ SENSITIVE_CYCLES 的格子直接标「在噪声内，不下结论」**。
+3. **网格步长敏感**：步长从 10 改成 5，B0007 的 stable 会从 80 跳到 135。
+   所以步长写成参数，并给一张步长敏感性列；`t*` 不是电池的固有常数。
+
+四档置信度 80 / 90 / 95 / 99%：置信度越高区间越宽，`t*(80) ≤ t*(90) ≤ t*(95) ≤ t*(99)`——
+由断言钉住。
 
 提前量
 ------
-- 稳定口径的提前量：`点估计(t*) − t*`（还能用多少个循环才知道「它还能用多少」）；
-- 命中口径的提前量：`真值 − t*`（在真正失效前多少循环发出了可用的预警）。
-
-刻意不做的事
-------------
-- **不用「区间半宽 ≤ 系统不确定性」当判据**：那样会给出过早的 t*（理由见上），
-  这个诱惑在 W15 结束时出现过，这里明确拒绝。
-- **不把 t0 网格开过真值**（有真值的电池）：观测已经越过 EOL 之后再说「预测」没有意义。
-  所以网格上界取 `min(N − 10, 真值 − 5)`。
+- 稳定口径：`点估计(t*) − t*`（还要观测多久，才敢说它还能用多久）；
+- 命中口径：`真值 − t*`（在真正失效前多少循环发出了可用预警；**可以为负**，
+  负值意味着「预警晚于失效」，这本身是要报的事实）。
 
 产物
 ----
@@ -52,8 +54,7 @@ import pandas as pd
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config import METRIC_DIR, TABLE_DIR, ensure_dirs, setup_matplotlib  # noqa: E402
-from evaluate import temporal_split  # noqa: E402
+from config import METRIC_DIR, RANDOM_SEED, TABLE_DIR, ensure_dirs, setup_matplotlib  # noqa: E402
 from figures import save  # noqa: E402
 from load_data import load_raw  # noqa: E402
 from preprocess import cell_profile, mark_rows  # noqa: E402
@@ -64,158 +65,173 @@ CSV_OUT = METRIC_DIR / "warning_time.csv"
 LEVELS = (80, 90, 95, 99)
 """四档置信度（百分数）。"""
 
-T0_STEP = 10
-"""t0 网格步长（循环）。"""
+SEEDS = (RANDOM_SEED, 7, 123, 2024)
+"""后验路径的种子。t* 常常只差 0–1 循环，单种子报出去的数不可靠。"""
+
+SENSITIVE_CYCLES = 1.0
+"""余量小于等于这个数（循环）就认为「在蒙特卡洛噪声内」，不下结论。"""
+
+GRID_STEP = 10
+GRID_STEP_SENSITIVITY = 5
+GRID_START_FACTOR = 4
+UPPER_OFFSET = 10
+"""上界 = 观测长度 − 10。**绝不用真值**（R9-04）。"""
 
 
 # ---------------------------------------------------------------------------
-# 逐 t0 的预测
+# 逐 t0 的预测（多随机种子）
 # ---------------------------------------------------------------------------
-def scan_cell(df: pd.DataFrame, cell: str, eol_true: float | None) -> pd.DataFrame:
-    """固定一块电池，逐个 t0 拟合 M4 并取四档区间的上下界。"""
+def scan_cell(
+    df: pd.DataFrame,
+    cell: str,
+    seeds: tuple[int, ...] = SEEDS,
+    step: int = GRID_STEP,
+) -> pd.DataFrame:
+    """固定一块电池，逐个 t0 拟合 M4，并对每个种子取四档区间的上下界。"""
     import models_gpr
 
-    n_obs = int(df.loc[df["battery_id"] == cell, "cycle"].max())
-    upper = n_obs - T0_STEP
-    if eol_true is not None:
-        upper = min(upper, int(eol_true) - 5)  # 观测越过 EOL 之后不再谈预测
-    grid = list(range(T0_STEP * 4, upper + 1, T0_STEP))
-    assert grid, f"{cell} 的 t0 网格是空的（观测长度 {n_obs}，真值 {eol_true}）"
-
-    # 只切这一块电池：temporal_split 会同时切四块，短电池会拖垮长电池的网格
     sub = df.loc[df["battery_id"] == cell].sort_values("cycle")
+    n_obs = int(sub["cycle"].max())
+    upper = n_obs - UPPER_OFFSET
+    grid = list(range(step * GRID_START_FACTOR, upper + 1, step))
+    assert grid, f"{cell} 的 t0 网格是空的（观测长度 {n_obs}）"
+
     t_all = sub["cycle"].to_numpy(float)
     y_all = sub["capacity_Ah"].to_numpy(float)
 
     rows = []
     for t0 in grid:
         model = models_gpr.fit_gpr(t_all[:t0], y_all[:t0])
-        dist = models_gpr.eol_from_paths(model, n_obs)
-        rec = {
-            "电池": cell,
-            "t0": t0,
-            "点估计": models_gpr.eol_mean(model, n_obs),
-            "后验中位数": float(dist["median"]),
-            "真值": eol_true,
-        }
-        for p in LEVELS:
-            lo_q, hi_q = (100 - p) / 2.0, 100 - (100 - p) / 2.0
-            # eol_from_paths 返回的 "eol" 是每条后验路径各自的寿命（删失路径为 NaN）
+        rec = {"电池": cell, "t0": t0, "点估计": models_gpr.eol_mean(model, n_obs)}
+        for seed in seeds:
+            dist = models_gpr.eol_from_paths(model, n_obs, seed=seed)
             ok = dist["eol"][np.isfinite(dist["eol"])]
-            lo, hi = np.percentile(ok, [lo_q, hi_q])
-            rec[f"L{p}"] = float(lo)
-            rec[f"U{p}"] = float(hi)
-            rec[f"半宽{p}"] = (float(hi) - float(lo)) / 2.0
+            for p in LEVELS:
+                lo_q, hi_q = (100 - p) / 2.0, 100 - (100 - p) / 2.0
+                lo, hi = np.percentile(ok, [lo_q, hi_q])
+                rec[f"L{p}_s{seed}"] = float(lo)
+                rec[f"U{p}_s{seed}"] = float(hi)
         rows.append(rec)
     return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
-# 两个 t* 的定义
+# 两个 t* 的定义（并入余量与后缀长度）
 # ---------------------------------------------------------------------------
-def first_stable(tbl: pd.DataFrame, p: int) -> int | None:
-    """最早 t0，使得此后所有 t0 的区间有公共交集（= 预测不再改主意）。"""
-    lo = tbl[f"L{p}"].to_numpy(float)
-    hi = tbl[f"U{p}"].to_numpy(float)
+def first_stable(tbl: pd.DataFrame, p: int, seed: int) -> tuple[int | None, float, int]:
+    """最早 t0，此后所有 t0 的区间有公共交集。返回 (t0, 余量, 后缀点数)。"""
+    lo = tbl[f"L{p}_s{seed}"].to_numpy(float)
+    hi = tbl[f"U{p}_s{seed}"].to_numpy(float)
     t0 = tbl["t0"].to_numpy(int)
     for i in range(len(tbl)):
-        if lo[i:].max() <= hi[i:].min():
-            return int(t0[i])
-    return None
+        margin = float(hi[i:].min() - lo[i:].max())
+        if margin >= 0:
+            return int(t0[i]), margin, int(len(tbl) - i)
+    return None, float("nan"), 0
 
 
-def first_hit(tbl: pd.DataFrame, p: int) -> int | None:
-    """最早 t0，使得此后所有 t0 的区间都盖住真值（需要真值，只能事后算）。"""
-    if tbl["真值"].isna().all():
-        return None
-    truth = float(tbl["真值"].iloc[0])
-    lo = tbl[f"L{p}"].to_numpy(float)
-    hi = tbl[f"U{p}"].to_numpy(float)
+def first_hit(tbl: pd.DataFrame, p: int, seed: int, truth: float) -> tuple[int | None, float, int]:
+    """最早 t0，此后所有 t0 的区间都盖住真值。返回 (t0, 余量, 后缀点数)。"""
+    lo = tbl[f"L{p}_s{seed}"].to_numpy(float)
+    hi = tbl[f"U{p}_s{seed}"].to_numpy(float)
     t0 = tbl["t0"].to_numpy(int)
-    inside = (lo <= truth) & (truth <= hi)
     for i in range(len(tbl)):
-        if inside[i:].all():
-            return int(t0[i])
-    return None
+        margin = float(np.minimum(hi[i:] - truth, truth - lo[i:]).min())
+        if margin >= 0:
+            return int(t0[i]), margin, int(len(tbl) - i)
+    return None, float("nan"), 0
 
 
-def build_tstar(scans: dict[str, pd.DataFrame]) -> pd.DataFrame:
-    """每块电池 × 四档 → t*_stable / t*_hit / 两个提前量。"""
+def build_tstar(scans: dict[str, pd.DataFrame], truth: dict[str, float | None],
+                step5: dict[str, pd.DataFrame]) -> pd.DataFrame:
+    """每块电池 × 四档 → 跨种子 min–max 的 t*、余量、步长敏感性。"""
     rows = []
     for cell, tbl in scans.items():
-        truth = None if tbl["真值"].isna().all() else float(tbl["真值"].iloc[0])
-        n_obs = int(tbl["t0"].max())
+        t_true = truth.get(cell)
+        last = int(tbl["t0"].max())
         for p in LEVELS:
-            ts = first_stable(tbl, p)
-            th = first_hit(tbl, p)
+            st = [first_stable(tbl, p, s) for s in SEEDS]
+            st_vals = [v[0] for v in st if v[0] is not None]
+            st_margin = min((v[1] for v in st if v[0] is not None), default=float("nan"))
+            if t_true is None:
+                hit_vals, hit_margin = [], float("nan")
+            else:
+                hit = [first_hit(tbl, p, s, t_true) for s in SEEDS]
+                hit_vals = [v[0] for v in hit if v[0] is not None]
+                hit_margin = min((v[1] for v in hit if v[0] is not None), default=float("nan"))
 
-            def _at(t0):
-                if t0 is None or pd.isna(t0):
-                    return float("nan")
-                hit_rows = tbl.loc[tbl["t0"] == t0, "点估计"]
-                return float(hit_rows.iloc[0]) if len(hit_rows) else float("nan")
+            point_at = float(tbl.loc[tbl["t0"] == st_vals[0], "点估计"].iloc[0]) if st_vals else float("nan")
+            st5 = [first_stable(step5[cell], p, s)[0] for s in SEEDS]
+            st5_vals = [v for v in st5 if v is not None]
 
-            point = _at(ts)
             rows.append(
                 {
                     "电池": cell,
                     "置信度": p,
-                    "有真值": truth is not None,
-                    "t*_stable": ts,
-                    "t*_hit": th,
-                    "稳定口径提前量": (point - ts) if ts is not None else float("nan"),
-                    "命中口径提前量": (truth - th) if (th is not None and truth is not None) else float("nan"),
-                    "t*_stable 处的点估计": point,
-                    "t*_stable 处的误差": (point - truth) if truth is not None else float("nan"),
-                    "t*_hit 处的误差": (
-                        float(tbl.loc[tbl["t0"] == th, "点估计"].iloc[0]) - truth
-                        if (th is not None and truth is not None
-                            and (tbl["t0"] == th).any()) else float("nan")
-                    ),
-                    "网格上界": n_obs,
+                    "有真值": t_true is not None,
+                    "t*_stable 最小": min(st_vals) if st_vals else None,
+                    "t*_stable 最大": max(st_vals) if st_vals else None,
+                    "稳定余量(循环)": st_margin,
+                    "t*_hit 最小": min(hit_vals) if hit_vals else None,
+                    "t*_hit 最大": max(hit_vals) if hit_vals else None,
+                    "命中余量(循环)": hit_margin,
+                    "t*_stable(步长5)": min(st5_vals) if st5_vals else None,
+                    "稳定口径提前量": (point_at - st_vals[0]) if st_vals else float("nan"),
+                    "命中口径提前量": (t_true - min(hit_vals)) if hit_vals else float("nan"),
+                    "网格最后一点": last,
+                    "点估计@稳定": point_at,
                 }
             )
     return pd.DataFrame(rows)
 
 
-def assert_monotone(tstar: pd.DataFrame) -> None:
-    """置信度越高，区间越宽，t* 只能更早或相等。写错分位数这条立刻炸。
+def add_flags(tstar: pd.DataFrame) -> pd.DataFrame:
+    """标出「在噪声内」「在网格边界」两类不能当精确值的格子。"""
+    out = tstar.copy()
+    out["在噪声内"] = (
+        (out["稳定余量(循环)"] <= SENSITIVE_CYCLES)
+        | (out["命中余量(循环)"] <= SENSITIVE_CYCLES)
+    )
+    out["t* 触到网格边界"] = (
+        (out["t*_stable 最小"] == out["t*_stable(步长5)"])  # 占位，下面覆盖
+        | False
+    )
+    first_grid = GRID_STEP * GRID_START_FACTOR
+    out["t* 触到网格边界"] = (out["t*_stable 最小"] <= first_grid) | (
+        out["t*_stable 最大"] >= out["网格最后一点"]
+    )
+    return out
 
-    只对**有值**的档位比较：某块电池若在高置信度上才第一次命中（低档位永远命中不了），
-    那是「区间太窄、从没盖住真值」的**真实结论**，不是 NaN 该被填掉的地方。
-    """
+
+def assert_monotone(tstar: pd.DataFrame) -> None:
+    """置信度越高，区间越宽，t* 只能更早或相等。档位写反这条立刻炸。"""
     for cell, g in tstar.groupby("电池"):
         g = g.sort_values("置信度")
-        for col, nicer in (("t*_stable", "稳定"), ("t*_hit", "命中")):
+        for col, nicer in (("t*_stable 最小", "稳定"), ("t*_hit 最小", "命中")):
             vals = [float(v) for v in g[col].tolist() if pd.notna(v)]
             assert all(a >= b for a, b in zip(vals, vals[1:])), (
-                f"{cell} 的 {nicer} t* 随置信度不单调：{g[col].tolist()}——分位数算反了"
+                f"{cell} 的 {nicer} t* 随置信度不单调：{g[col].tolist()}——分位数或档位算反了"
             )
-
-    # 稳定时刻不能整体算不出来：网格内总该有某个时刻起预测不再改主意
-    assert tstar["t*_stable"].notna().all(), (
-        "有电池在网格内始终不稳定："
-        f"{tstar.loc[tstar['t*_stable'].isna(), ['电池', '置信度']].to_dict('records')}"
-        "——要么网格太短，要么区间算错了"
+    assert tstar["t*_stable 最小"].notna().all(), (
+        "有电池在网格内始终不稳定——要么网格太短，要么区间算错了"
     )
 
 
 def assert_warning_before_failure(tstar: pd.DataFrame) -> None:
-    """命中口径的提前量必须为正；且「命中」不能整体消失（否则这条检查是空的）。"""
-    hit = tstar.dropna(subset=["t*_hit"])
+    """命中时刻至少要有一块电池早于失效；且「命中」不能整体消失（否则检查是空的）。"""
+    hit = tstar.dropna(subset=["t*_hit 最小"])
     assert hit["电池"].nunique() >= 2, (
-        f"只有 {hit['电池'].nunique()} 块电池算出了命中时刻——"
-        "要么实现坏了，要么这条断言形同虚设"
+        f"只有 {hit['电池'].nunique()} 块电池算出了命中时刻——要么实现坏了，要么这条断言形同虚设"
     )
-    assert (hit["命中口径提前量"] > 0).all(), (
-        f"有电池的预警晚于真实失效：{hit.loc[hit['命中口径提前量'] <= 0, ['电池', '置信度']].to_dict('records')}"
-    )
+    early = hit.loc[hit["命中口径提前量"] > 0, "电池"].nunique()
+    assert early >= 2, f"只有 {early} 块电池在失效前就命中——「最早可信预警」这个结论不成立"
 
 
 # ---------------------------------------------------------------------------
 # 图
 # ---------------------------------------------------------------------------
-def fig14(scans: dict[str, pd.DataFrame], tstar: pd.DataFrame) -> Path:
+def fig14(scans: dict[str, pd.DataFrame], tstar: pd.DataFrame,
+          truth: dict[str, float | None]) -> Path:
     setup_matplotlib()
     fig, axes = plt.subplots(1, 2, figsize=(15.0, 5.6))
 
@@ -224,12 +240,9 @@ def fig14(scans: dict[str, pd.DataFrame], tstar: pd.DataFrame) -> Path:
     for cell, tbl in scans.items():
         ax.plot(tbl["t0"], tbl["点估计"], "-o", ms=3.5, lw=1.4, color=colors.get(cell, "#333"),
                 label=f"{cell} 点估计")
-        truth = tbl["真值"].iloc[0]
-        if not pd.isna(truth):
-            ax.axhline(float(truth), ls=":", lw=1.0, color=colors.get(cell, "#333"), alpha=0.8)
-            ax.text(float(tbl["t0"].min()), float(truth),
-                    f" 真值 {int(truth)}", fontsize=7.5, va="bottom",
-                    color=colors.get(cell, "#333"))
+    for cell, t_val in (("B0005", 125), ("B0006", 109), ("B0018", 97)):
+        ax.axhline(t_val, ls=":", lw=1.0, color=colors[cell], alpha=0.8)
+        ax.text(41, t_val, f" {cell} 真值 {t_val}", fontsize=7, va="bottom", color=colors[cell])
     ax.set_xlabel("观测到第 t0 个循环（预测时刻）")
     ax.set_ylabel("预测的 EOL（循环）")
     ax.set_title("① 点估计随观测时长的摆动：早期极不稳定，后期才收敛", fontsize=10)
@@ -243,19 +256,33 @@ def fig14(scans: dict[str, pd.DataFrame], tstar: pd.DataFrame) -> Path:
         vals = []
         for cell in cells:
             row = tstar[(tstar["电池"] == cell) & (tstar["置信度"] == p)].iloc[0]
-            v = row["t*_hit"]
-            vals.append(np.nan if v is None or pd.isna(v) else float(v))
+            v = row["t*_hit 最小"]
+            vals.append(np.nan if pd.isna(v) else float(v))
         x = np.arange(len(cells)) + (k - 1.5) * w
         ax.bar(x, vals, w, label=f"命中 t*（{p}%）", alpha=0.9)
     ax.set_xticks(np.arange(len(cells)))
     ax.set_xticklabels(cells)
-    # 删失电池没有真值，命中口径不适用——不标注会被读成「它最早，等于 0」
+    # 真值星标：B0006 的命中 t*（110）落在真值 109 之后，画出来才看得见「预警晚于失效」
+    labelled = False
     for i, cell in enumerate(cells):
-        if not bool(tstar.loc[tstar["电池"] == cell, "有真值"].iloc[0]):
-            ax.text(i, 3, "删失\n无真值", ha="center", va="bottom", fontsize=8,
-                    color="#8a6d3b")
+        t = truth.get(cell)
+        if t is None:
+            continue
+        ax.scatter([i], [float(t)], marker="*", s=150, color="#c0392b", zorder=6,
+                   label=None if labelled else "真实失效（=真值）")
+        labelled = True
+    for i, cell in enumerate(cells):
+        row = tstar[tstar["电池"] == cell].iloc[0]
+        if not bool(row["有真值"]):
+            ax.text(i, 3, "删失\n无可命中", ha="center", va="bottom", fontsize=8, color="#8a6d3b")
+        elif tstar[(tstar["电池"] == cell)]["t*_hit 最小"].isna().all():
+            ax.text(i, 3, "从未命中\n（区间整段偏离）", ha="center", va="bottom", fontsize=8,
+                    color="#c0392b")
+        elif tstar[(tstar["电池"] == cell)]["t*_hit 最小"].isna().any():
+            ax.text(i, 3, "低档位\n从未命中", ha="center", va="bottom", fontsize=8, color="#c0392b")
     ax.set_ylabel("最早可信时刻 t*（循环）")
     ax.set_title("② 四档置信度下「从第几循环起预测一直命中真值」", fontsize=10)
+    ax.set_ylim(0, max(ax.get_ylim()[1], 120))
     ax.legend(fontsize=8)
 
     fig.suptitle("图14　最早可信预警时刻：区间够窄 ≠ 预测可信", fontsize=13, y=1.0)
@@ -266,13 +293,31 @@ def fig14(scans: dict[str, pd.DataFrame], tstar: pd.DataFrame) -> Path:
 # ---------------------------------------------------------------------------
 # markdown
 # ---------------------------------------------------------------------------
-def render_md(scans: dict[str, pd.DataFrame], tstar: pd.DataFrame) -> str:
-    n_label = sum(1 for t in scans.values() if not t["真值"].isna().all())
-    gap_rows = tstar.dropna(subset=["t*_stable"])
-    # 「stable 早于 hit」的格子：这些就是「预测settled但还错」的直接证据
-    early = tstar.dropna(subset=["t*_stable", "t*_hit"])
-    early = early.loc[early["t*_stable"] < early["t*_hit"]]
-    worst = early.sort_values("t*_stable 处的误差", key=lambda s: s.abs(), ascending=False)
+def render_md(scans: dict[str, pd.DataFrame], tstar: pd.DataFrame,
+              truth: dict[str, float | None]) -> str:
+    n_label = sum(1 for v in truth.values() if v is not None)
+    labeled = [c for c, v in truth.items() if v is not None]
+    sens = tstar[tstar["在噪声内"]]
+    never = tstar[tstar["t*_hit 最小"].isna() & tstar["有真值"]]
+    never_cells = sorted(never["电池"].unique().tolist())
+
+    # 找出「区间从某时刻起整体落到真值下方」的直接证据（B0006 那类）
+    offside = []
+    for cell in labeled:
+        tbl = scans[cell]
+        t = float(truth[cell])
+        for p in LEVELS:
+            u = tbl[f"U{p}_s{RANDOM_SEED}"].to_numpy(float)
+            below = u < t
+            idx = None
+            for i in range(len(below)):
+                if below[i:].all():
+                    idx = i
+                    break
+            if idx is not None:
+                offside.append((cell, p, int(tbl["t0"].iloc[idx]), t,
+                                float(tbl["点估计"].iloc[idx]), idx == 0))
+                break
 
     out = [
         "# 最早可信预警时刻 t*（W16）",
@@ -289,112 +334,130 @@ def render_md(scans: dict[str, pd.DataFrame], tstar: pd.DataFrame) -> str:
         "| **稳定** t*_stable(p) | 此后所有时刻的 p% 区间**有公共交集**：再加数据也不改主意 | 否 | 能 |",
         "| **命中** t*_hit(p) | 此后所有时刻的 p% 区间**都盖住真值**：从此一直对 | 是 | 只能事后诊断 |",
         "",
-        "四档 80 / 90 / 95 / 99% 指**区间置信度**。置信度越高区间越宽，"
-        "故 `t*(80) ≤ t*(90) ≤ t*(95) ≤ t*(99)`——这条已写成断言，分位数写反会当场炸。",
+        f"四档 80 / 90 / 95 / 99% 指**区间置信度**；置信度越高区间越宽，"
+        "故 `t*(80) ≤ t*(90) ≤ t*(95) ≤ t*(99)`（已写成断言）。",
         "",
-        "## 二、主表",
+        "**三条必须写明的口径**：",
+        "",
+        f"1. **网格不碰真值**：上界一律 `N − 10`。初版曾用 `min(N−10, 真值−5)`，"
+        "那等于让「可部署量」偷看真值；放开后 B0006 的稳定时刻从 40/60/90 变成 90/100/110"
+        "（95% 档差 60 循环）。",
+        f"2. **蒙特卡洛敏感**：分位数来自 {300} 条后验路径，`models_gpr` 自述 MC 误差约 ±1 循环。"
+        f"每个格子跑 {len(SEEDS)} 个路径种子报 min–max，"
+        f"**余量 ≤ {SENSITIVE_CYCLES:g} 循环的格子标为「在噪声内，不下结论」**。",
+        f"3. **网格步长敏感**：主口径步长 {GRID_STEP}，另给步长 {GRID_STEP_SENSITIVITY} 的稳定时刻做对照——"
+        "t* **不是电池的固有常数**。",
+        "",
+        "## 二、主表（t* 跨种子 min–max）",
         "",
         tstar.round(2).to_markdown(index=False),
         "",
-        "（`网格上界` = 该电池允许预测的最晚时刻：有真值的电池取 `min(N−10, 真值−5)`，"
-        "观测已经越过失效点之后再说「预测」没有意义。）",
+        f"`网格最后一点` = 该电池允许预测的最晚时刻（= 观测长度 − {UPPER_OFFSET}）。"
+        "`t* 触到网格边界` 为真的格子，真实值可能在该网格之外，不能当精确数用。",
         "",
         "## 三、**区间够窄 ≠ 预测可信**（本节最重要的一条）",
         "",
     ]
 
-    if len(early):
-        r = worst.iloc[0]
-        never = tstar[
-            tstar["t*_hit"].isna() & tstar["t*_stable"].notna() & tstar["有真值"]
-        ]  # 只数「有真值却没命中」的；删失电池命中不了是定义上的必然，不该混进来
-        never_cells = sorted(never["电池"].unique().tolist())
-        out += []
-        if never_cells:
-            c0 = never_cells[0]
-            tb = scans[c0]
-            lo_pt, hi_pt = float(tb["点估计"].min()), float(tb["点估计"].max())
-            truth0 = None if tb["真值"].isna().all() else int(float(tb["真值"].iloc[0]))
-            lv = "、".join(str(int(v)) for v in never.loc[never["电池"] == c0, "置信度"])
-            out += [
-                f"**第一类（更严重）：区间从来就没盖住真值。**"
-                f"{c0} 在 {lv}% 档位上，"
-                f"整条观测期内点估计在 **{lo_pt:.0f}–{hi_pt:.0f}** 之间摆动，"
-                + (f"而真值是 **{truth0}**，" if truth0 is not None else "")
-                + "窄区间一次都没包含它。这不是「晚一点才可信」，是**窄区间本身就不可信**。",
-                "",
-            ]
+    if offside:
+        for c0, p0, t_first, t_true, point0, from_start in offside:
+            if from_start:
+                out += [
+                    f"**第一类：区间整段偏离真值。** {c0} 的 {p0}% 区间在**整个预测窗口内**"
+                    f"都落在真值 **{int(t_true)}** 下方，一次都没盖住它"
+                    f"（窗口末点估计 {point0:.0f}）。",
+                    "",
+                ]
+            else:
+                out += [
+                    f"**第一类：区间后期整体偏离真值。** {c0} 的 {p0}% 区间从第 **{t_first}** 循环起"
+                    f"整体落到真值 **{int(t_true)}** 下方（该处点估计 {point0:.0f}），此后没再盖住它。"
+                    "注意这不是「从头到尾没盖住」——更早的时刻区间还包含真值，是**后期系统性偏低**。",
+                    "",
+                ]
+    if never_cells:
         out += [
-            f"**第二类：稳定了，但还不准。** 以 **{r['电池']}** 为例：到第 "
-            f"**{int(r['t*_stable'])}** 循环，{int(r['置信度'])}% 区间就不再改主意了，"
-            f"可此时点估计是 **{r['t*_stable 处的点估计']:.0f}** 循环、"
-            f"真值 **{int(float(scans[r['电池']]['真值'].iloc[0]))}**——"
-            f"误差 **{r['t*_stable 处的误差']:+.0f} 循环**；"
-            f"要等到第 **{int(r['t*_hit'])}** 循环才稳定命中，"
-            f"两者差 **{int(r['t*_hit']) - int(r['t*_stable'])} 个循环**。",
+            f"**「从未命中」的是这些档位**：" + "、".join(
+                f"{c}（{'、'.join(str(int(v)) for v in never.loc[never['电池'] == c, '置信度'])}%）"
+                for c in never_cells
+            ) + "——在**允许的预测窗口内**，这些档位从没稳定盖住真值。",
             "",
-            f"合计「稳定早于命中」的（电池×档位）组合有 **{len(early)}/{len(tstar)}** 个；"
-            f"另有 **{len(never)}** 个组合是「命中从未发生」。"
-            "两类都指向同一件事：**拿「区间够窄/不再变」当发布预警的条件，会发出靠不住的预警。**",
         ]
-    else:
+
+    early = tstar.dropna(subset=["t*_stable 最小", "t*_hit 最小"])
+    early = early.loc[early["t*_stable 最小"] < early["t*_hit 最小"]]
+    if len(early):
+        r = early.sort_values("t*_hit 最小").iloc[-1]
         out += [
-            "本数据里没有出现「稳定早于命中」的格子——"
-            "即预测一旦不再改主意，就已经在盖住真值。"
-            "（这句话由代码判定，不是先写好的。）",
+            f"**第二类：稳定了，但还不准。** 以 **{r['电池']}**（{int(r['置信度'])}%）为例："
+            f"第 **{int(r['t*_stable 最小'])}** 循环起区间就不再改主意，"
+            f"但要到第 **{int(r['t*_hit 最小'])}** 循环起才稳定命中，"
+            f"差 **{int(r['t*_hit 最小']) - int(r['t*_stable 最小'])} 个循环**。",
+            "",
         ]
 
     out += [
+        f"合计「稳定早于命中」的（电池×档位）组合 **{len(early)}/{len(tstar)}**；"
+        f"「在噪声内、不下结论」的 **{len(sens)}/{len(tstar)}**。",
+        "",
+        # 提前量为负 = 预警晚于失效，必须单独点出来，不能混在表里
+        (
+            "**注意：有电池的命中提前量为负**（预警晚于真实失效）——"
+            + "、".join(
+                f"{r['电池']}（{int(r['置信度'])}% 档提前量 {r['命中口径提前量']:+.0f}）"
+                for _, r in tstar.dropna(subset=["命中口径提前量"]).iterrows()
+                if r["命中口径提前量"] <= 0
+            )
+            + "。按可部署口径（网格不看真值），这些电池**没有及时发出可用预警**。"
+            if (tstar["命中口径提前量"] <= 0).any() else
+            "所有算出命中时刻的档位，预警都发生在失效之前。"
+        ),
+        "",
+        f"⚠️ **{len(sens)} 个格子的余量 ≤ {SENSITIVE_CYCLES:g} 循环**，"
+        "换一个后验路径种子就会翻。报告里引用这些格子时必须写 min–max，不能写单个数。",
         "",
         "## 四、为什么不能用「区间半宽 ≤ 系统不确定性」当判据",
         "",
-        "W15 给出系统不确定性（定义层 + 模型形式层）是 20–34.5 循环。看起来很自然："
-        "「统计区间窄于系统误差时，统计精度就够用了」。**但这个判据在本数据上是错的**：",
+        "W15 给出系统不确定性（定义层 + 模型形式层）20–34.5 循环。"
+        "「统计区间窄于系统误差时就够用」听起来自然，但**判据方向错了**："
+        "窄只说明「这条直线估得准」，不说明「这条直线是对的」——后者属于形式层，不在区间里。",
         "",
-        scans and "".join(
-            f"- {cell}：t0={int(tbl['t0'].min())} 时 95% 半宽 {tbl['半宽95'].iloc[0]:.1f}、"
-            f"点估计 {tbl['点估计'].iloc[0]:.0f}；"
-            f"到 t0={int(tbl['t0'].max())} 时半宽 {tbl['半宽95'].iloc[-1]:.1f}、"
-            f"点估计 {tbl['点估计'].iloc[-1]:.0f}"
-            + (
-                f"（真值 {int(float(tbl['真值'].iloc[0]))}）"
-                if not tbl["真值"].isna().all() else "（删失）"
-            )
-            + "\n"
-            for cell, tbl in scans.items()
-        ),
+        "逐块首末对照（`半宽95` 是 95% 区间半宽）：",
         "",
-        "半宽缩小得比点估计收敛快得多，而**这两件事是两回事**：",
+    ]
+    for cell in labeled + [c for c in scans if c not in labeled]:
+        tbl = scans[cell]
+        half = (tbl[f"U95_s{RANDOM_SEED}"] - tbl[f"L95_s{RANDOM_SEED}"]) / 2.0
+        tail = f"（真值 {int(truth[cell])}）" if truth.get(cell) else "（删失）"
+        out.append(
+            f"- {cell}：t0={int(tbl['t0'].iloc[0])} 时半宽 {half.iloc[0]:.1f}、"
+            f"点估计 {tbl['点估计'].iloc[0]:.0f}；t0={int(tbl['t0'].iloc[-1])} 时"
+            f"半宽 {half.iloc[-1]:.1f}、点估计 {tbl['点估计'].iloc[-1]:.0f}{tail}"
+        )
+    out += [
         "",
-        "- **B0005 / B0007**：半宽从 100+ 降到 10 以下，但点估计要到很晚才落到真值附近；",
-        "- **B0018**：半宽从头到尾都只有几个循环（4.0 起），点估计却从 79 一路摆到 97。",
-        "",
-        "**窄区间只说明「这条直线估得准」，不说明「这条直线是对的」**——"
-        "后者属于模型形式层，不在区间里。这个差口就是 W18 要用 PICP 检测的**校准问题**。",
+        "**注意不要把这句话概括成「半宽总在缩小」**：B0018 的半宽从 4.0 一路涨到 13.8 再回落，"
+        "而它的点估计也在摆。两种形态都说明同一件事——**区间宽度与预测正确性不是一回事**。",
         "",
         "## 五、提前量",
         "",
-        "- **稳定口径**：`点估计(t*) − t*` = 「还要观测多少个循环，才敢说它还能用多少个循环」；",
-        "- **命中口径**：`真值 − t*` = 「在真正失效前多少个循环发出了可用的预警」。",
-        "",
-        tstar.dropna(subset=["t*_hit"])[
-            ["电池", "置信度", "t*_hit", "命中口径提前量"]
+        tstar.dropna(subset=["t*_hit 最小"])[
+            ["电池", "置信度", "t*_hit 最小", "t*_hit 最大", "命中口径提前量", "命中余量(循环)"]
         ].round(2).to_markdown(index=False),
         "",
-        f"有真值的电池 {n_label} 块；删失电池（"
-        + "、".join(c for c, t in scans.items() if t["真值"].isna().all())
-        + "）没有命中口径，只能报稳定口径。",
+        f"有真值的电池 {n_label} 块；"
+        + "、".join(c for c in scans if truth.get(c) is None) + " 删失，只能报稳定口径。"
+        "命中提前量**为负意味着预警晚于失效**，那本身是要报的事实。",
         "",
         "## 六、这张表不能怎么读",
         "",
-        "1. **不能说「观测到第 X 个循环就能预测寿命」**：那是稳定口径，"
-        "不等于预测正确（第三节）。",
-        "2. **不能把 t* 当常数推广到别的电池**：本数据只有 4 块，"
-        "t* 是这块电池的曲线形状决定的，换批次必须重算。",
-        "3. **不能用 t*_hit 做部署**：它需要真值才能算，只能用来**事后**评估"
-        "「我们的预警够不够早」。",
-        "4. **四档之间的差不是精度提升**：置信度从 80% 到 99%，区间变宽、t* 变早，"
-        "这是同一个预测的两种说法，不是两个模型。",
+        "1. **不能说「观测到第 X 个循环就能预测寿命」**：那是稳定口径，不等于预测正确（第三节）。",
+        f"2. **不能忽略种子区间**：{len(sens)}/{len(tstar)} 个格子在噪声内，"
+        "报告引用时必须带 min–max。",
+        f"3. **不能忽略步长**：步长 {GRID_STEP} → {GRID_STEP_SENSITIVITY} 会让个别电池的稳定时刻大幅移动"
+        "（见 `t*_stable(步长5)` 列）。",
+        "4. **不能用 t*_hit 做部署**：它需要真值才能算，只能事后评估预警够不够早。",
+        "5. **不能把 t* 当电池常数推广**：本数据只有 4 块，换批次必须重算。",
         "",
     ]
     return "\n".join(out)
@@ -406,23 +469,26 @@ def main() -> int:
     df = mark_rows(raw)
     prof = cell_profile(df).set_index("battery_id")
 
-    scans = {}
-    for cell in sorted(df["battery_id"].unique()):
-        e = prof.loc[cell, "eol_cycle"]
-        scans[cell] = scan_cell(df, cell, None if pd.isna(e) else int(e))
+    truth = {
+        cell: (None if pd.isna(prof.loc[cell, "eol_cycle"]) else int(prof.loc[cell, "eol_cycle"]))
+        for cell in sorted(df["battery_id"].unique())
+    }
+    scans = {cell: scan_cell(df, cell) for cell in truth}
+    step5 = {cell: scan_cell(df, cell, step=GRID_STEP_SENSITIVITY) for cell in truth}
 
-    tstar = build_tstar(scans)
+    tstar = add_flags(build_tstar(scans, truth, step5))
     assert_monotone(tstar)
     assert_warning_before_failure(tstar)
 
     CSV_OUT.parent.mkdir(parents=True, exist_ok=True)
     tstar.to_csv(CSV_OUT, index=False, encoding="utf-8-sig")
-    TABLE_MD.write_text(render_md(scans, tstar), encoding="utf-8")
-    fig_path = fig14(scans, tstar)
+    TABLE_MD.write_text(render_md(scans, tstar, truth), encoding="utf-8")
+    fig_path = fig14(scans, tstar, truth)
 
-    print(f"t0 网格步长 {T0_STEP}；置信度档位 {LEVELS}")
-    print(tstar[["电池", "置信度", "t*_stable", "t*_hit", "稳定口径提前量",
-                 "命中口径提前量", "t*_stable 处的误差"]].round(1).to_string(index=False))
+    print(f"网格：起点 {GRID_STEP * GRID_START_FACTOR}、步长 {GRID_STEP}（敏感性 {GRID_STEP_SENSITIVITY}）、"
+          f"上界 N−{UPPER_OFFSET}；种子 {SEEDS}")
+    print(tstar[["电池", "置信度", "t*_stable 最小", "t*_stable 最大", "稳定余量(循环)",
+                 "t*_hit 最小", "t*_hit 最大", "在噪声内"]].round(1).to_string(index=False))
     print()
     print(f"已写出：{TABLE_MD.name} / {CSV_OUT.name} / {fig_path.name}")
     return 0

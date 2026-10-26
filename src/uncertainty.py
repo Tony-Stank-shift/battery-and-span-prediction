@@ -111,7 +111,18 @@ def layer_definition(
 
 
 def layer_model(param_tbl: pd.DataFrame, gpr_tbl: pd.DataFrame) -> pd.DataFrame:
-    """模型形式层：同一块电池，不同形式给出的 EOL 的半极差。"""
+    """模型形式层：同一块电池，不同形式给出的 EOL 的半极差。
+
+    **必须同时给两个版本**（R9-01 抓出来的要害）：
+    M1 与 M4 的 EOL 四个数完全相同（146/94/159/97，这是 W11 的结论：GP 不外推），
+    所以「含 M2」与「不含 M2」的模型层是两回事：
+    - `含 M2`：M2 与 M1 的半极差，19.5 / 2.5 / 22 / 0；
+    - `不含 M2`：**恒为 0**——这一层的全部宽度都由双指数形式提供。
+
+    而且 W14 已经判定 M2 在三块电池上显著更差。所以这一层的正确说法是
+    「**若把双指数也当作先验可信的形式之一，形式之差的上界有多大**」，
+    不是「三种形式势均力敌」。
+    """
     rows = []
     for cell in sorted(param_tbl["电池"].unique()):
         vals = {}
@@ -125,11 +136,13 @@ def layer_model(param_tbl: pd.DataFrame, gpr_tbl: pd.DataFrame) -> pd.DataFrame:
             vals[name] = None if str(v) == "—" else int(v)
         finite = [v for v in vals.values() if v is not None]
         assert len(finite) >= 2, f"{cell} 上少于两个模型给出 EOL，算不出形式离散度"
+        no_m2 = [v for k, v in vals.items() if k != "M2 双指数" and v is not None]
         rows.append(
             {
                 "电池": cell,
                 **vals,
                 "模型层半极差": (max(finite) - min(finite)) / 2.0,
+                "模型层半极差(不含M2)": (max(no_m2) - min(no_m2)) / 2.0,
                 "参与模型数": len(finite),
             }
         )
@@ -164,16 +177,31 @@ def cross_check_definition(
     """
     import sensitivity
 
+    # 口径必须与 W7 一致：窗口半宽、以及「哪块电池用了短窗口」
+    assert TAU_HALF in sensitivity.WINDOW_HALVES, (
+        f"TAU_HALF={TAU_HALF} 不在 W7 的窗口集合 {sensitivity.WINDOW_HALVES} 里——两边口径分叉了"
+    )
+
     ws = sensitivity.window_sweep(series)
     col = f"±{TAU_HALF:g}"
     n_checked = 0
+    n_short = 0
     for _, row in ws.iterrows():
+        name = row["电池"]
+        got, note = out[name]
         try:
             v = float(row[col])
         except (TypeError, ValueError):
+            # B0007 在这里：W7 给的是下界「>24」，本模块给的是可达窗口的 22。
+            # 两条口径都要显式钉住，否则这块电池的检查就是空白（R9-09）。
+            full_span = float(len(series[name][1]) - sensitivity.eol_at_exact(
+                series[name][1], EOL_THRESHOLD_AH + TAU_HALF))
+            assert abs(full_span - 24.0) < 1e-9, (
+                f"{name} 的完整窗口下界应为 24（= 168 − 144），实得 {full_span}"
+            )
+            assert "下端删失" in note, f"{name} 用了短窗口却没在口径列里写明"
+            n_short += 1
             continue
-        name = row["电池"]
-        got = out[name][0]
         assert abs(got - v) < 1e-9, (
             f"{name}: 本模块算的定义层极差 {got} 与 W7 发表的 {v} 不一致——同一算法两个实现打架"
         )
@@ -181,24 +209,53 @@ def cross_check_definition(
     assert n_checked >= 3, (
         f"只对账了 {n_checked} 块——这个检查形同虚设（列名或口径可能改了）"
     )
+    assert n_short == 1, f"短窗口电池应有 1 块（B0007），实得 {n_short} 块"
+
+
+def assert_layers_contribute(tbl: pd.DataFrame) -> None:
+    """每一层都必须**真的进入**合并结果（R9-10：原来的三条是恒真式）。
+
+    原来断言「RSS ≥ 任一层」「SUM ≥ RSS」——对任意非负三元组恒成立，
+    把某一层整层删掉也照样通过。改成**扰动检查**：把某一层置 0，RSS 必须变小；
+    这样「少了一层」就再也藏不住。
+    """
+    for col in ("定义层半宽", "模型层半极差", "数据层半宽"):
+        base = tbl["rss"].to_numpy(float)
+        other = [c for c in ("定义层半宽", "模型层半极差", "数据层半宽") if c != col]
+        perturbed = np.sqrt(np.sum([tbl[c].to_numpy(float) ** 2 for c in other], axis=0))
+        sum_perturbed = sum(tbl[c].to_numpy(float) for c in other)
+        mask = tbl[col].to_numpy(float) > 0
+        assert mask.any(), f"「{col}」在所有电池上都是 0——这一层实际不存在，报告里不能当一层卖"
+        assert (perturbed[mask] < base[mask]).all(), (
+            f"把「{col}」整层置 0 之后 RSS 没变小——这一层没进入合并结果"
+        )
+        assert (sum_perturbed[mask] < tbl["sum"].to_numpy(float)[mask]).all(), (
+            f"把「{col}」整层置 0 之后 SUM 没变小——这一层没进入合并结果"
+        )
+
+
+def assert_model_layer_source(tbl: pd.DataFrame) -> None:
+    """把 R9-01 的事实钉成断言：模型形式层的宽度**全部来自 M2**。
+
+    M1 线性与 M4 趋势+GPR 的 EOL 四个数完全相同（W11：GP 不外推，点预测=趋势线），
+    所以「不含 M2」的半极差恒为 0。这不是 bug，是结构决定的——
+    但正因如此，报告里不许把这一层说成「三种形式势均力敌」。
+    """
+    assert (tbl["模型层半极差(不含M2)"].to_numpy(float) == 0).all(), (
+        "排除 M2 之后模型形式层不为 0——说明 M1 与 M4 的 EOL 不再相同，"
+        "报告里「形式层全部来自 M2」这句话必须重写"
+    )
+    assert (tbl["模型层半极差"] >= tbl["模型层半极差(不含M2)"]).all(), (
+        "含 M2 的形式层比不含 M2 还窄——半极差的算法写错了"
+    )
 
 
 def assert_combined(tbl: pd.DataFrame) -> None:
-    """合并口径的三条结构性检查。同样放在 `combine` 外面，供调用方执行。"""
-    stack = np.column_stack([
-        tbl["定义层半宽"].to_numpy(float),
-        tbl["模型层半极差"].to_numpy(float),
-        tbl["数据层半宽"].to_numpy(float),
-    ])
-    assert (tbl["rss"].to_numpy(float) >= np.nanmax(stack, axis=1) - 1e-9).all(), (
-        "RSS 合并比某一单层还窄——三层里有一层没进去"
-    )
+    """合并口径的结构性检查（放在调用方，不在 combine 里面）。"""
     assert (tbl["sum"].to_numpy(float) >= tbl["rss"].to_numpy(float) - 1e-9).all(), (
         "最坏情况合并比 RSS 还窄——合并口径写反了"
     )
-    assert (tbl["sum"].to_numpy(float) >= np.nanmax(stack, axis=1) - 1e-9).all(), (
-        "最坏情况合并比某一单层还窄——SUM 没把三层都加进去"
-    )
+    assert_layers_contribute(tbl)
 
 
 def combine(tbl: pd.DataFrame) -> pd.DataFrame:
@@ -296,8 +353,16 @@ def render_md(tbl: pd.DataFrame, m: int) -> str:
     )
     names = ["定义层", "模型形式层", "数据层"]
     counts = {nm: int((rss_biggest == k).sum()) for k, nm in enumerate(names)}
-    ratio = (tbl["定义层半宽"] + tbl["模型层半极差"]) / tbl["数据层半宽"]
-    ratio_lo, ratio_hi = float(ratio.min()), float(ratio.max())
+    b7_rows = tbl.loc[tbl["定义层口径"].astype(str).str.contains("下端删失")]
+    assert len(b7_rows) == 1, "短窗口电池应当恰好一块"
+    b7 = b7_rows.iloc[0]
+    b7_short = float(b7["定义层极差"])
+    b7_window = str(b7["定义层口径"]).split("窗口", 1)[-1].strip()
+    full_short = float(b7["定义层完整窗口极差"])
+    ratio_short = (float(b7["定义层半宽"]) + float(b7["模型层半极差"])) / float(b7["数据层半宽"])
+    ratio_equal = (float(b7["定义层完整窗口极差"]) / 2 + float(b7["模型层半极差"])) / float(
+        b7["数据层半宽"]
+    )
 
     def _num_or_dash(v, nd=1):
         return "—" if pd.isna(v) else round(float(v), nd)
@@ -310,7 +375,6 @@ def render_md(tbl: pd.DataFrame, m: int) -> str:
     disp4["误差"] = disp4["误差"].map(_num_or_dash)
     disp5 = tbl[["电池", "误差", "数据层半宽", "rss", "sum"]].copy()
     disp5["误差"] = disp5["误差"].map(_num_or_dash)
-
     out = [
         "# 三层不确定性：定义 / 模型形式 / 数据，统一折算成循环数（W15）",
         "",
@@ -330,7 +394,7 @@ def render_md(tbl: pd.DataFrame, m: int) -> str:
         f"| **定义层** | 「坏」的标准定在哪 | τ = {EOL_THRESHOLD_AH:g} ± {TAU_HALF:g} Ah 窗内 EOL 的**极差** | "
         "τ 是工程惯例不是物理常数；用**无模型**扫描（原始序列上找穿越点），不掺模型外推 |",
         "| **模型形式层** | 假设了哪种函数形式 | M1 / M2 / M4 三个 EOL 的**半极差** | "
-        "W14 的逐点检验没有选出赢家；形式之差本身就是不确定度 |",
+        "见下方「这一层全部来自 M2」的说明 |",
         "| **数据层** | 噪声与参数估不准 | M4 后验 90% 区间的**半宽** | "
         "含残差噪声 + 趋势参数误差（W11 方差分解），不含前两层 |",
         "",
@@ -338,14 +402,32 @@ def render_md(tbl: pd.DataFrame, m: int) -> str:
         "但那是**跨个体**的现象；在逐个体模型里它已经被残差项整体吸收。"
         "再单列一层会把同一份方差算两次。",
         "",
+        "### ⚠️ 这一层的宽度**全部来自 M2**（第七轮审查抓出来的要害）",
+        "",
+        "M1 线性与 M4 趋势+GPR 的 EOL 四个数**完全相同**（146/94/159/97）——"
+        "这是 W11 的结论：GP 在数据外归零，点预测就是趋势线。所以：",
+        "",
+        f"- 「不含 M2」的模型层半极差：**{tbl['模型层半极差(不含M2)'].min():.1f}–"
+        f"{tbl['模型层半极差(不含M2)'].max():.1f}**（恒为 0，已写成断言）；",
+        f"- 「含 M2」的模型层半极差：{tbl['模型层半极差'].min():.1f}–{tbl['模型层半极差'].max():.1f}。",
+        "",
+        "而 W14 的逐点配对检验判定：**M2 在 B0005 / B0006 / B0007 三块上显著更差**"
+        "（两判据一致），只在 B0018 上无差别。",
+        "用测试集把它剔掉确实有泄漏嫌疑，所以本节**照样计入**——"
+        "但这一层的正确读法是「**若把双指数也当作先验可信的形式之一，形式之差的上界有多大**」，"
+        "**不是**「三种形式势均力敌」。引用时必须带上这句限定。",
+        "",
         "## 三、三层各自的数值（循环）",
         "",
         tbl[["电池", "定义层口径"]].to_markdown(index=False),
         "",
         "（B0007 的下端 1.35 Ah 低于它自己的最低容量 1.4005 Ah，"
-        "完整窗口内的极差在 W7 里只能写成下界「>24」；本节要的是一个能进预算的数，"
-        "所以改用**可达窗口** [1.4005, 1.45] 得 22，并在上表写明口径。"
-        "两个数都对，但含义不同，引用时必须带上窗口。）",
+        f"完整窗口内的极差在 W7 里只能写成下界「>{full_short:.0f}」；本节要一个能进预算的数，"
+        f"所以改用**可达窗口** {b7_window} 得 **{b7_short:.0f}**，并在上表写明口径。"
+        "W7 还给了同宽替代（窗口平移到 [1.4005, 1.5005]，极差 40）——"
+        "**短尺不与长尺比**：若改用同宽，B0007 的「定义+模型 ÷ 数据」会从 "
+        f"{ratio_short:.2f} 变成 {ratio_equal:.2f}。"
+        "主结论因此只用「定义层在每块都不小」这种不依赖跨块比值的陈述，避开这个陷阱。）",
         "",
         disp3.round(2).to_markdown(index=False),
         "",
@@ -388,17 +470,31 @@ def render_md(tbl: pd.DataFrame, m: int) -> str:
         "",
         "M4 的 90% 区间只含**数据层**"
         f"（半宽 {tbl['数据层半宽'].min():.1f}–{tbl['数据层半宽'].max():.1f} 循环），"
-        "而真实误差还要叠加定义层（"
-        f"{tbl['定义层半宽'].min():.1f}–{tbl['定义层半宽'].max():.1f}）"
-        f"与模型形式层（{tbl['模型层半极差'].min():.1f}–{tbl['模型层半极差'].max():.1f}）。",
+        "而真实误差还要叠加定义层与模型形式层。逐块对照：",
         "",
-        "逐块对照（`误差` 是点估计减真值，`sum` 是三层最坏情况半宽）：",
+        tbl[["电池", "误差", "数据层半宽", "定义层半宽", "模型层半极差", "rss", "sum"]]
+        .round(1).to_markdown(index=False),
         "",
-        tbl[["电池", "误差", "数据层半宽", "rss", "sum"]].round(1).to_markdown(index=False),
+        "**「先消灭哪一层」不能一句话概括**——逐块看，最小的那一层并不固定："
+        + "；".join(
+            f"{r['电池']} 最小的是 "
+            + min(
+                (("定义层", r["定义层半宽"]), ("模型层", r["模型层半极差"]),
+                 ("数据层", r["数据层半宽"])),
+                key=lambda kv: kv[1],
+            )[0]
+            for _, r in tbl.iterrows()
+        )
+        + "。",
         "",
-        "**结论：想把「±多少循环」做小，先要把阈值与函数形式定下来**"
-        f"（定义层与模型层之和是数据层的 {ratio_lo:.1f}–{ratio_hi:.1f} 倍），"
-        "而不是把 GP 的核调得更好——后者只能压数据层那一块。",
+        f"能说的是：**定义层在每一块都不小（{tbl['定义层半宽'].min():.1f}–"
+        f"{tbl['定义层半宽'].max():.1f} 循环）**，而它按定义就不该由模型负责——"
+        "它取决于你把「坏」的标准定在哪。所以在调模型之前先把阈值口径写清楚，"
+        "否则调得再准，结论仍然只是一个「相对某个惯例」的数。",
+        "",
+        "（第一版这里写的是「定义层+模型层是数据层的 1.6–3.7 倍」——那个比值"
+        "**完全由 M2 撑着**：剔掉 M2 之后模型层恒为 0，比值变成 0.55–3.25，结论不成立。"
+        "审查 R9-01 抓出来后已删，改用上面这种逐块陈述。）",
         "",
         "## 六、哪一层最大？",
         "",
@@ -411,7 +507,8 @@ def render_md(tbl: pd.DataFrame, m: int) -> str:
         "",
         "1. **不能把 SUM 当 95% 区间**：它是**最坏情况**界，不是概率陈述；"
         "报告里出现「95%」只能指数据层那一个。",
-        "2. **不能因为 SUM 覆盖了真值就说模型准**：SUM 宽 40–60 循环，"
+        f"2. **不能因为 SUM 覆盖了真值就说模型准**：SUM 宽 "
+        f"{tbl['sum'].min():.0f}–{tbl['sum'].max():.0f} 循环，"
         "覆盖是保守的代价，不是精度的证据。",
         "3. **不能拿这份覆盖率和 W18 的 PICP 比**：这里 n = "
         f"{n_label}，W18 用的是逐点区间、样本量大得多。",
@@ -452,6 +549,15 @@ def main() -> int:
     tbl = tbl.merge(layer_data(gpr["fits"], sorted(series)), on="电池", how="left")
     tbl = combine(tbl)
     assert_combined(tbl)  # 检查在调用方，不在 combine 里面（变异才抓得到）
+    assert_model_layer_source(tbl)
+
+    # 短窗口电池的「完整窗口极差」另算一列：它进 md 的散文，必须由代码生成（R9-08）
+    import sensitivity
+
+    for cell in tbl.loc[tbl["定义层口径"].astype(str).str.contains("下端删失"), "电池"]:
+        cap = series[cell][1]
+        hi = sensitivity.eol_at_exact(cap, EOL_THRESHOLD_AH + TAU_HALF)
+        tbl.loc[tbl["电池"] == cell, "定义层完整窗口极差"] = float(len(cap) - hi)
 
     CSV_OUT.parent.mkdir(parents=True, exist_ok=True)
     tbl.to_csv(CSV_OUT, index=False, encoding="utf-8-sig")

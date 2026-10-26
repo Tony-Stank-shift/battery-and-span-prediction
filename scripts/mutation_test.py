@@ -3,8 +3,10 @@
 一个从不失败的断言等于没有断言。做法是手工注入已知错误，
 看对应的断言是否**按预期炸掉**。每次注入都必须让管线以非零退出码结束。
 
-当前 **23 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + W12 两条 +
-W13 三条 + 一条回归用例（W8-R1）。
+当前 **33 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + W12 两条 +
+W13 五条 + W15 四条 + W16 四条 + 一条回归用例（W8-R1）。
+
+（跑得比早期慢很多：W16 的变异要真跑整条 t* 扫描，单条约 1 分钟。）
 
 它真的抓到过东西（不只是验证代码）：
 1. 最初我给 W8 写的变异是「把 trailing 滚动窗口换成居中窗口」，预期泄漏检测会炸——
@@ -16,7 +18,7 @@ W13 三条 + 一条回归用例（W8-R1）。
 
 用法
 ----
-    python scripts/mutation_test.py      # 23/23 通过才说明这些断言不是空的
+    python scripts/mutation_test.py      # 33/33 通过才说明这些断言不是空的
 """
 
 from __future__ import annotations
@@ -342,11 +344,12 @@ def main() -> int:
     # --- W16 变异 1：把区间上下界写反（置信度越高反而越窄）---
     _orig_scan = warning.scan_cell
 
-    def swapped_cell(df, cell, eol_true):
-        out = _orig_scan(df, cell, eol_true)
+    def swapped_cell(df, cell, seeds=warning.SEEDS, step=warning.GRID_STEP):
+        out = _orig_scan(df, cell, seeds=seeds, step=step)
         for p in warning.LEVELS:
-            lo, hi = out[f"L{p}"].copy(), out[f"U{p}"].copy()
-            out[f"L{p}"], out[f"U{p}"] = hi, lo
+            for s in seeds:
+                lo, hi = out[f"L{p}_s{s}"].copy(), out[f"U{p}_s{s}"].copy()
+                out[f"L{p}_s{s}"], out[f"U{p}_s{s}"] = hi, lo
         return out
 
     results.append(
@@ -358,19 +361,37 @@ def main() -> int:
         )
     )
 
+    # --- W16 变异 1b：四档置信度的顺序换反（单调性断言必须响，R9-11）---
+    _orig_build = warning.build_tstar
+
+    def swapped_levels(scans, truth, step5):
+        t = _orig_build(scans, truth, step5)
+        flipped = list(reversed(warning.LEVELS))
+        t["置信度"] = t["置信度"].map(dict(zip(warning.LEVELS, flipped)))
+        return t
+
+    results.append(
+        run_case(
+            "W16-M1b 四档置信度的顺序被换反（t* 单调性必须被抓）",
+            warning,
+            {"attr": "build_tstar", "new": swapped_levels},
+            "随置信度不单调",
+        )
+    )
+
     # --- W16 变异 2：命中时刻往后推 100 循环（预警晚于失效）---
     _orig_hit = warning.first_hit
 
-    def late_hit(tbl, p):
-        v = _orig_hit(tbl, p)
-        return None if v is None else int(v) + 100
+    def late_hit(tbl, p, seed, truth):
+        v = _orig_hit(tbl, p, seed, truth)
+        return (None, v[1], v[2]) if v[0] is None else (int(v[0]) + 100, v[1], v[2])
 
     results.append(
         run_case(
             "W16-M2 命中时刻被推后 100 循环（预警晚于真实失效）",
             warning,
             {"attr": "first_hit", "new": late_hit},
-            "有电池的预警晚于真实失效",
+            "块电池在失效前就命中",
         )
     )
 
@@ -379,8 +400,27 @@ def main() -> int:
         run_case(
             "W16-M3 命中时刻永远算不出来（断言形同虚设）",
             warning,
-            {"attr": "first_hit", "new": lambda tbl, p: None},
+            {"attr": "first_hit", "new": lambda tbl, p, seed, truth: (None, float("nan"), 0)},
             "这条断言形同虚设",
+        )
+    )
+
+    # --- W15 变异 4：把模型形式层整层从合并里删掉（R9-10：原来的断言是恒真式）---
+    _orig_combine2 = uncertainty.combine
+
+    def drop_model_layer(tbl):
+        out = _orig_combine2(tbl.copy())
+        d, s = out["定义层半宽"], out["数据层半宽"]
+        out["rss"] = (d**2 + s**2) ** 0.5
+        out["sum"] = d + s
+        return out
+
+    results.append(
+        run_case(
+            "W15-M4 合并时把模型形式层整层漏掉",
+            uncertainty,
+            {"attr": "combine", "new": drop_model_layer},
+            "这一层没进入合并结果",
         )
     )
 
@@ -397,7 +437,7 @@ def main() -> int:
             "W15-M1 三层用算术平均合并（合并比单层还窄）",
             uncertainty,
             {"attr": "combine", "new": mean_combine},
-            "RSS 合并比某一单层还窄",
+            "这一层没进入合并结果",
         )
     )
 
