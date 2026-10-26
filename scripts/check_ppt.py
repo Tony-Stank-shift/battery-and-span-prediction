@@ -77,8 +77,8 @@ def main() -> int:
     s1 = strat[(strat["表"] == "S1") & (strat["判据"] == "SUM 裕度") & strat["真值"].notna()]
     lo = s1["提前量比例"].min() * 100
     hi = s1["提前量比例"].max() * 100
-    need(f"{lo:.0f}%" in body and f"{hi:.0f}%" in body,
-         f"策略页的提前量 {lo:.0f}%–{hi:.0f}% 没出现在幻灯片里（或与产物不一致）")
+    need(f"{lo:.1f}%" in body and f"{hi:.1f}%" in body,
+         f"策略页的提前量 {lo:.1f}%–{hi:.1f}% 没出现在幻灯片里（或与产物不一致）")
     for needle in ("0.997", "63%"):
         need(needle in body, f"幻灯片里找不到关键数字 {needle}")
 
