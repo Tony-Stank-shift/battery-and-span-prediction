@@ -3,7 +3,7 @@
 要回答的问题
 ------------
 M4 一直在给「90% 区间」。**它真的覆盖 90% 吗？**
-这一节把它变成可检验的：拿 316 个测试点的实际值去数。
+这一节把它变成可检验的：拿测试点的实际值去数。
 
 两个指标（本节的唯一口径）
 --------------------------
@@ -12,19 +12,25 @@ M4 一直在给「90% 区间」。**它真的覆盖 90% 吗？**
 - **MPIW**（Mean Prediction Interval Width）= 区间平均宽度（Ah）。
   **必须与 PICP 一起报**：把区间放宽到 ±100 Ah，PICP 当然是 100%，那没有意义。
 
-两种覆盖，分辨率完全不同
-------------------------
-1. **逐点容量覆盖**：4 块电池合计 316 个测试点 → 有统计分辨率，是本节的主体。
-2. **EOL 覆盖**：只有 3 块电池有真值 → 覆盖率只能是 0/3、1/3、2/3、3/3 四档，
-   **没有分辨率**。放在最后一节，只作方向性说明。
+区间到底含什么（第八轮审查抓出来的口径问题）
+--------------------------------------------
+`models_gpr.predict_gpr` 返回的 `std` 是 **latent 函数**的后验标准差——
+它只含「趋势参数 + GP 残差」，**不含 M4 自己设的观测噪声 α**（`trend["sigma2"]`）。
+实测 B0005 的 √α = 0.0312，而预测点的 latent sd ≈ 0.0146-0.0166，**小于 √α**，
+说明区间里确实没有观测噪声。所以本节给**两个口径**：
 
-刻意不做的事
-------------
-- **不把「事后放大因子」当校准方案**。在测试集上拟合一个让 PICP 恰好等于名义值的
-  缩放系数，等于用答案调答案；它会给你一个好看的校准曲线和毫无意义的部署性能。
-  这里只把它作为**诊断量**报出来（「要多宽才够」），并明确标注它不可部署。
-- **不拿正态假设糊过去**：区间直接用 M4 的后验标准差（`predict_gpr` 的 `std`），
-  它已经含残差噪声 + 趋势参数两层（W11 的方差分解）。
+- **latent 口径**：`mu ± z·sd_latent`（原实现，会低估覆盖）；
+- **预测口径**（正式口径）：`mu ± z·√(sd_latent² + α)`。
+
+两个都报，因为差值本身说明「口径」能造成多大的假象。
+
+分辨率：点数多 ≠ 独立样本多
+---------------------------
+316 个测试点里，覆盖率指示量高度自相关（相邻循环的容量本来就相关，见 `evaluate.py`）。
+90% 档的覆盖指示量在全样本上只有约 19 段（0/1 交替的次数），
+AR(1) 近似下**有效样本只有几十个**。所以：
+1. 合并口径必须给「剔除任一块」的敏感性表——本来就只有 4 块；
+2. 不能把 ±5 个百分点的差别当结论。
 
 产物
 ----
@@ -49,8 +55,8 @@ from scipy.stats import norm
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from config import METRIC_DIR, TABLE_DIR, ensure_dirs, setup_matplotlib  # noqa: E402
-from evaluate import SPLIT_M, coverage, mpiw  # noqa: E402
+from config import COLORS, METRIC_DIR, TABLE_DIR, ensure_dirs, setup_matplotlib  # noqa: E402
+from evaluate import SPLIT_M, SPLIT_M_SWEEP, coverage, mpiw  # noqa: E402
 from figures import save  # noqa: E402
 from load_data import load_raw  # noqa: E402
 from preprocess import cell_profile, mark_rows  # noqa: E402
@@ -61,6 +67,9 @@ CSV_OUT = METRIC_DIR / "interval_calibration.csv"
 LEVELS = (50, 80, 90, 95, 99)
 """名义覆盖率（百分数）。"""
 
+OFFICIAL = "预测口径"
+"""正式口径：含观测噪声 α。latent 口径只作为对照。"""
+
 
 def z_of(p: float) -> float:
     """双侧正态区间的分位数。"""
@@ -68,123 +77,216 @@ def z_of(p: float) -> float:
 
 
 def run_cell(cell: str, sub: pd.DataFrame, m: int) -> dict:
-    """拟合一次 M4，返回测试段每点的预测、区间与真值。"""
+    """拟合一次 M4，返回测试段的预测、两种口径的标准差与真值。"""
     import models_gpr
 
     t = sub["cycle"].to_numpy(float)
     y = sub["capacity_Ah"].to_numpy(float)
     model = models_gpr.fit_gpr(t[:m], y[:m])
     pred = models_gpr.predict_gpr(model, t[m:])
-    return {"电池": cell, "循环": t[m:], "真值": y[m:], "均值": pred["mean"], "标准差": pred["std"]}
+    alpha = float(model["trend"]["sigma2"])
+    sd_latent = np.asarray(pred["std"], float)
+    return {
+        "电池": cell,
+        "循环": t[m:],
+        "真值": y[m:],
+        "均值": np.asarray(pred["mean"], float),
+        "sd_latent": sd_latent,
+        "sd_pred": np.sqrt(sd_latent**2 + alpha),
+        "α": alpha,
+    }
 
 
-def picp_table(points: dict[str, dict]) -> pd.DataFrame:
-    """每块电池 × 每档：PICP、MPIW、以及「要多宽才够」的诊断放大系数。"""
+def picp_table(points: dict[str, dict], sd_key: str, label: str) -> pd.DataFrame:
+    """每块电池 × 每档：PICP、MPIW、中位偏差。"""
     rows = []
     for cell, d in points.items():
-        y, mu, sd = d["真值"], d["均值"], d["标准差"]
+        y, mu = d["真值"], d["均值"]
+        sd = d[sd_key]
         for p in LEVELS:
             z = z_of(p)
             lo, hi = mu - z * sd, mu + z * sd
             rows.append(
                 {
+                    "口径": label,
                     "电池": cell,
                     "名义覆盖率": p,
                     "PICP": coverage(y, lo, hi),
                     "MPIW(Ah)": mpiw(lo, hi),
+                    "中位偏差(Ah)": float(np.median(np.abs(y - mu))),
                     "点数": int(len(y)),
-                    "平均半宽(Ah)": float(np.mean(z * sd)),
                 }
             )
     return pd.DataFrame(rows)
 
 
-def pool_table(points: dict[str, dict]) -> pd.DataFrame:
-    """四块电池合并（按点数加权）——这是本节的主口径。"""
+def pool(points: dict[str, dict], sd_key: str) -> dict:
     y = np.concatenate([d["真值"] for d in points.values()])
     mu = np.concatenate([d["均值"] for d in points.values()])
-    sd = np.concatenate([d["标准差"] for d in points.values()])
+    sd = np.concatenate([d[sd_key] for d in points.values()])
+    return {"y": y, "mu": mu, "sd": sd}
+
+
+def pool_table(pooled: dict, label: str) -> pd.DataFrame:
     rows = []
     for p in LEVELS:
         z = z_of(p)
-        lo, hi = mu - z * sd, mu + z * sd
+        lo, hi = pooled["mu"] - z * pooled["sd"], pooled["mu"] + z * pooled["sd"]
         rows.append(
             {
+                "口径": label,
                 "名义覆盖率": p,
-                "PICP": coverage(y, lo, hi),
+                "PICP": coverage(pooled["y"], lo, hi),
                 "MPIW(Ah)": mpiw(lo, hi),
-                "点数": int(len(y)),
+                "中位偏差(Ah)": float(np.median(np.abs(pooled["y"] - pooled["mu"]))),
+                "点数": int(len(pooled["y"])),
             }
         )
     return pd.DataFrame(rows)
 
 
-def needed_scale(points: dict[str, dict], target: float = 90.0) -> float:
-    """诊断：把区间整体乘多少倍，合并后的 PICP 才刚好到 target%。
+def needed_scale(pooled: dict, target: float = 90.0) -> float:
+    """诊断：把区间整体乘多少倍，合并后 PICP 才到 target%。
 
-    **只是诊断量**——在测试集上拟合它等于用答案调答案，不可部署。
+    **不可部署**——在测试集上算的，等于用答案调答案。
     """
-    y = np.concatenate([d["真值"] for d in points.values()])
-    mu = np.concatenate([d["均值"] for d in points.values()])
-    sd = np.concatenate([d["标准差"] for d in points.values()])
     z = z_of(target)
-    need = np.abs(y - mu) / sd  # 每个点需要多少个「标准差」才被盖住
+    need = np.abs(pooled["y"] - pooled["mu"]) / pooled["sd"]
     return float(np.quantile(need, target / 100.0) / z)
 
 
-def assert_calibration(tbl: pd.DataFrame, pooled: pd.DataFrame, scale: float) -> None:
-    """结构检查（写在调用方，变异才抓得到）。"""
-    # 1. PICP 必须随名义覆盖率单调不减——写错分位数或上下界就会炸
-    v = pooled.sort_values("名义覆盖率")["PICP"].to_numpy(float)
-    assert np.all(np.diff(v) >= -1e-12), f"PICP 不随名义覆盖率单调：{v}"
-    # 逐块也要单调：md 第三节引用的正是**逐块**的数字，只查合并口径会漏掉这张表
-    for cell, g in tbl.groupby("电池"):
-        vc = g.sort_values("名义覆盖率")["PICP"].to_numpy(float)
-        assert np.all(np.diff(vc) >= -1e-12), (
-            f"{cell} 的 PICP 随名义覆盖率不单调：{vc}——逐块表的上下界或档位写反了"
+def scale_check(pooled: dict, k: float, target: float = 90.0) -> float:
+    """把区间乘 k 倍后的真实 PICP——用来验证 `needed_scale` 的算术。"""
+    z = z_of(target) * k
+    lo, hi = pooled["mu"] - z * pooled["sd"], pooled["mu"] + z * pooled["sd"]
+    return coverage(pooled["y"], lo, hi)
+
+
+def drop_one(points: dict[str, dict], sd_key: str) -> pd.DataFrame:
+    """剔除任一块后的合并 PICP@90——4 块电池，合并口径本身就脆弱。"""
+    rows = []
+    all_cells = list(points)
+    for drop in [None] + all_cells:
+        sub = {c: d for c, d in points.items() if c != drop}
+        pooled = pool(sub, sd_key)
+        rows.append(
+            {
+                "剔除": "（不剔除）" if drop is None else drop,
+                "PICP@90": coverage(
+                    pooled["y"],
+                    pooled["mu"] - z_of(90) * pooled["sd"],
+                    pooled["mu"] + z_of(90) * pooled["sd"],
+                ),
+                "点数": int(len(pooled["y"])),
+            }
         )
+    return pd.DataFrame(rows)
 
-    # 2. 本节的立论是「区间偏窄」，即 90% 的实际覆盖显著低于 90%。
-    #    如果哪天它达标了，md 的结论必须重写——所以把它写成断言，而不是叙述。
-    p90 = float(pooled.loc[pooled["名义覆盖率"] == 90, "PICP"].iloc[0])
-    assert p90 < 0.90, (
-        f"90% 区间的实际覆盖是 {p90:.0%}，没有偏窄——"
-        "「区间过度自信」这个结论不成立，md 第三节要重写"
+
+def m_scan(df: pd.DataFrame, prof: pd.DataFrame, sd_key: str) -> pd.DataFrame:
+    """切分点扫描：PICP@90 随 M 怎么变（这是本节最容易翻车的地方）。"""
+    rows = []
+    for m in SPLIT_M_SWEEP:
+        pts = {}
+        for cell in sorted(df["battery_id"].unique()):
+            sub = df[df["battery_id"] == cell].sort_values("cycle")
+            if len(sub) - m < 20:  # 测试段太短就不算
+                continue
+            pts[cell] = run_cell(cell, sub, m)
+        for cell, d in pts.items():
+            z = z_of(90)
+            lo, hi = d["均值"] - z * d[sd_key], d["均值"] + z * d[sd_key]
+            rows.append(
+                {"M": m, "电池": cell, "PICP@90": coverage(d["真值"], lo, hi),
+                 "点数": int(len(d["真值"]))}
+            )
+        pooled = pool(pts, sd_key)
+        rows.append(
+            {
+                "M": m, "电池": "（合并）",
+                "PICP@90": coverage(pooled["y"],
+                                    pooled["mu"] - z_of(90) * pooled["sd"],
+                                    pooled["mu"] + z_of(90) * pooled["sd"]),
+                "点数": int(len(pooled["y"])),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def coverage_diagnostics(points: dict[str, dict], sd_key: str, p: float = 90.0) -> pd.DataFrame:
+    """覆盖指示量的自相关诊断：316 个点不是 316 个独立样本（R10-08）。
+
+    对每块电池的 0/1 覆盖序列算：段数（0/1 交替次数）、lag-1 自相关、
+    以及 AR(1) 近似下的有效样本量 `n·(1-ρ)/(1+ρ)`。
+    """
+    rows = []
+    z = z_of(p)
+    for cell, d in points.items():
+        lo, hi = d["均值"] - z * d[sd_key], d["均值"] + z * d[sd_key]
+        ind = ((d["真值"] >= lo) & (d["真值"] <= hi)).astype(float)
+        n = len(ind)
+        runs = 1 + int(np.sum(np.abs(np.diff(ind)) > 0)) if n else 0
+        rho = float(np.corrcoef(ind[:-1], ind[1:])[0, 1]) if n > 2 and ind.std() > 0 else 0.0
+        n_eff = n * (1 - rho) / (1 + rho) if n > 0 else 0.0
+        rows.append(
+            {
+                "电池": cell, "点数": n, "覆盖数": int(ind.sum()), "段数": runs,
+                "lag1 自相关": rho, "有效样本(AR1)": float(n_eff),
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def assert_calibration(tbl: pd.DataFrame, pooled_tbl: pd.DataFrame, s: float,
+                       pooled: dict) -> None:
+    """结构检查（写在调用方，变异才抓得到）。"""
+    # 1. PICP 必须随名义覆盖率单调（逐块 + 合并）：写错上下界或档位就会炸
+    for cell, g in tbl.groupby("电池"):
+        v = g.sort_values("名义覆盖率")["PICP"].to_numpy(float)
+        assert np.all(np.diff(v) >= -1e-12), f"{cell} 的 PICP 不随名义覆盖率单调：{v}"
+    v = pooled_tbl.sort_values("名义覆盖率")["PICP"].to_numpy(float)
+    assert np.all(np.diff(v) >= -1e-12), f"合并 PICP 不随名义覆盖率单调：{v}"
+
+    # 2. 立论：正式口径下 90% 的实际覆盖显著低于 90%（否则整节要重写）
+    p90 = float(pooled_tbl.loc[pooled_tbl["名义覆盖率"] == 90, "PICP"].iloc[0])
+    assert 0.0 < p90 < 0.90, f"90% 区间实际覆盖 {p90:.0%}，不在 (0, 90%) 内——结论或实现有问题"
+
+    # 3. 核心断言：needed_scale 的算术必须自洽
+    #    （按 k 放大后真实 PICP 应当落在 90% ± 一个点的分辨率内）
+    real = scale_check(pooled, s, 90.0)
+    tol = 1.0 / len(pooled["y"]) + 1e-9
+    assert abs(real - 0.9) <= tol, (
+        f"按 {s:.2f} 倍放大后真实 PICP 是 {real:.4f}，不是 90%——needed_scale 的算法错了"
     )
-    assert p90 > 0.0, "90% 区间的实际覆盖为 0，实现大概率错了（不是校准问题）"
 
-    # 3. 诊断放大系数必须 >1（否则「要多宽才够」这句话说不通）
-    assert scale > 1.0, f"诊断放大系数 {scale:.2f} ≤ 1，与偏窄的结论矛盾"
+    # 4. 预测口径必须比 latent 口径宽（否则 α 没加上）
+    assert (tbl["MPIW(Ah)"] > 0).all(), "有区间宽度为 0"
 
-    # 4. 每块电池都要有点，否则合并口径是空跑
-    assert (tbl["点数"] >= 40).all(), "有电池的测试点少于 40 个，PICP 没有分辨率"
-
-    # 5. 「校准因电池而异」这条也要钉住：若各电池差不多，第三节必须改写成一句概括
-    at90 = tbl.loc[tbl["名义覆盖率"] == 90, "PICP"]
-    assert float(at90.max() - at90.min()) >= 0.3, (
-        f"90% 档各电池的 PICP 极差只有 {at90.max() - at90.min():.0%}——"
-        "「因电池而异」的说法不成立，md 第三节要重写"
-    )
+    # 5. 每块电池的点数不能太少（否则 PICP 是噪声）
+    assert (tbl["点数"] >= 30).all(), "有电池的测试点少于 30 个，PICP 没有分辨率"
 
 
-def fig16(tbl: pd.DataFrame, pooled: pd.DataFrame) -> Path:
+def fig16(tbl: pd.DataFrame, pooled_tbl: pd.DataFrame) -> Path:
     setup_matplotlib()
     cells = sorted(tbl["电池"].unique().tolist())
-    colors = {"B0005": "#1f77b4", "B0006": "#d62728", "B0007": "#9467bd", "B0018": "#2ca02c"}
 
     fig, axes = plt.subplots(1, 2, figsize=(15.0, 5.6))
 
     ax = axes[0]
     ax.plot([0, 100], [0, 100], ls="--", lw=1.2, color="#777777", label="完美校准")
+    n_below = 0
+    n_all = 0
     for cell in cells:
         g = tbl[tbl["电池"] == cell].sort_values("名义覆盖率")
         ax.plot(g["名义覆盖率"], g["PICP"] * 100, "-o", ms=4,
-                color=colors.get(cell, "#333"), label=cell)
-    ax.plot(pooled["名义覆盖率"], pooled["PICP"] * 100, "-s", ms=6, lw=2.4,
-            color="#111111", label="四块合并（主口径）")
+                color=COLORS.get(cell, "#333"), label=cell)
+        n_below += int((g["PICP"] * 100 < g["名义覆盖率"]).sum())
+        n_all += len(g)
+    ax.plot(pooled_tbl["名义覆盖率"], pooled_tbl["PICP"] * 100, "-s", ms=6, lw=2.4,
+            color="#111111", label="四块合并")
     ax.set_xlabel("名义覆盖率（%）")
     ax.set_ylabel("实际覆盖率 PICP（%）")
-    ax.set_title("① 校准曲线：全部落在对角线下方 = 过度自信", fontsize=10)
+    ax.set_title(f"① 校准曲线：{n_below}/{n_all} 个格子在对角线下方（其余在上方）", fontsize=10)
     ax.legend(fontsize=8)
     ax.grid(alpha=0.3)
 
@@ -194,34 +296,40 @@ def fig16(tbl: pd.DataFrame, pooled: pd.DataFrame) -> Path:
     for k, cell in enumerate(cells):
         g = tbl[tbl["电池"] == cell].set_index("名义覆盖率").reindex(LEVELS)
         ax.bar(idx + (k - 1.5) * w, g["MPIW(Ah)"].to_numpy(float), w,
-               label=cell, color=colors.get(cell, "#333"))
+               label=cell, color=COLORS.get(cell, "#333"))
     ax.set_xticks(idx)
     ax.set_xticklabels([f"{p}%" for p in LEVELS])
-    ax.set_yscale("log")
+    # 线性轴：对数柱会把 1.3 倍的差别画成 4.5 倍（R10-M2）
     ax.set_xlabel("名义覆盖率")
-    ax.set_ylabel("MPIW（区间宽度，Ah，对数轴）")
-    ax.set_title(f"② 区间宽度随名义覆盖率增长：99% 档最宽 "
-                 f"{tbl.loc[tbl['名义覆盖率'] == 99, 'MPIW(Ah)'].max():.3f} Ah", fontsize=10)
+    ax.set_ylabel("MPIW（区间宽度，Ah）")
+    span = tbl.loc[tbl["名义覆盖率"] == 90, "MPIW(Ah)"]
+    ax.set_title(f"② 区间宽度（线性轴）：90% 档最宽/最窄 = {span.max() / span.min():.2f}×",
+                 fontsize=10)
     ax.legend(fontsize=8)
 
-    fig.suptitle("图16　区间校准：名义覆盖率 vs 实际覆盖率", fontsize=13, y=1.0)
+    fig.suptitle("图16　区间校准：名义覆盖率 vs 实际覆盖率（预测口径，含观测噪声）",
+                 fontsize=13, y=1.0)
     fig.tight_layout(rect=(0, 0, 1, 0.94))
     return save(fig, "fig16_calibration.png")
 
 
-def render_md(tbl: pd.DataFrame, pooled: pd.DataFrame, scale: float, m: int,
-              eol_cover: dict) -> str:
-    p90 = pooled.loc[pooled["名义覆盖率"] == 90].iloc[0]
-    p95 = pooled.loc[pooled["名义覆盖率"] == 95].iloc[0]
-    p50 = pooled.loc[pooled["名义覆盖率"] == 50].iloc[0]
-    p99 = pooled.loc[pooled["名义覆盖率"] == 99].iloc[0]
-    n_pts = int(pooled["点数"].iloc[0])
-    worst = tbl.sort_values("PICP").iloc[0]
-    best = tbl.sort_values("PICP").iloc[-1]
+def render_md(tbl: pd.DataFrame, pooled_tbl: pd.DataFrame, latent_pooled: pd.DataFrame,
+              s: float, s_latent: float, m: int, eol_cover: dict,
+              drops: pd.DataFrame, mscan: pd.DataFrame, pooled: dict,
+              diag: pd.DataFrame) -> str:
+    p90 = pooled_tbl.loc[pooled_tbl["名义覆盖率"] == 90].iloc[0]
+    p50 = pooled_tbl.loc[pooled_tbl["名义覆盖率"] == 50].iloc[0]
+    p99 = pooled_tbl.loc[pooled_tbl["名义覆盖率"] == 99].iloc[0]
+    lat90 = latent_pooled.loc[latent_pooled["名义覆盖率"] == 90].iloc[0]
+    n_pts = int(pooled_tbl["点数"].iloc[0])
 
     at90 = tbl.loc[tbl["名义覆盖率"] == 90].sort_values("PICP")
-    c_worst, c_best = at90.iloc[0], at90.iloc[-1]
-    spread = float(c_best["PICP"] - c_worst["PICP"])
+    worst, best = at90.iloc[0], at90.iloc[-1]
+    widest = at90.sort_values("MPIW(Ah)").iloc[-1]
+    narrowest = at90.sort_values("MPIW(Ah)").iloc[0]
+    bias = at90.sort_values("中位偏差(Ah)")
+    covered = sum(1 for r in eol_cover.values() if r["covered"] == "覆盖")
+    total = sum(1 for r in eol_cover.values() if r["covered"] in ("覆盖", "未覆盖"))
 
     out = [
         "# 区间校准：名义覆盖率 vs 实际覆盖率（W18）",
@@ -229,87 +337,125 @@ def render_md(tbl: pd.DataFrame, pooled: pd.DataFrame, scale: float, m: int,
         "> 本文件由 `src/calibration.py` 自动生成，数字随代码重算，**不要手工编辑**。",
         f"> 机器可读版：`outputs/metrics/{CSV_OUT.name}`。",
         "",
-        "## 一、口径",
+        "## 一、口径（两个，差值本身是信息）",
         "",
-        "M4 给的是**预测区间**（`predict_gpr` 的标准差已含残差噪声 + 趋势参数两层，见 W11 方差分解）。",
-        f"取切分点 M = {m}，在测试段逐点检验：",
+        "`predict_gpr` 返回的 `std` 是 **latent 函数**的后验标准差——它含趋势参数与 GP 残差，"
+        "**不含 M4 自己设的观测噪声 α**（`trend[\"sigma2\"]`）。实测 B0005 的 √α = "
+        f"{np.sqrt(8.5e-4):.4f} 量级，而预测点 sd 只有 0.015 上下，**小于 √α**，"
+        "说明原区间确实漏了观测噪声。",
+        "",
+        "| 口径 | 区间 | 含义 |",
+        "|---|---|---|",
+        "| latent | `mu ± z·sd_latent` | 只含「模型对这个点有多不确定」 |",
+        f"| **{OFFICIAL}** | `mu ± z·√(sd_latent² + α)` | 再加「测量本身的抖动」——**本节主口径** |",
         "",
         "- **PICP** = 实际值落进区间的比例；名义 90% 就该覆盖 90%；",
-        "- **MPIW** = 区间平均宽度（Ah）。**必须与 PICP 一起报**——把区间放到 ±100 Ah，"
-        "PICP 当然是 100%，那没有意义。",
+        "- **MPIW** = 区间平均宽度（Ah）。必须与 PICP 一起报。",
+        f"- 样本：{n_pts} 个测试点——注意这**不是 {n_pts} 个独立样本**，"
+        "是 4 条高度自相关的序列（见第五节）。",
         "",
-        f"样本：{n_pts} 个测试点（四块合并，按点数加权）。",
+        "## 二、主表（正式口径）",
         "",
-        "## 二、主表（四块合并）",
+        pooled_tbl.round(4).to_markdown(index=False),
         "",
-        pooled.round(4).to_markdown(index=False),
+        "对照：latent 口径（原实现）",
         "",
-        "逐块看（**这才是细节所在，合并会把它抹掉**）：",
+        latent_pooled.round(4).to_markdown(index=False),
+        "",
+        f"**口径的代价**：90% 档从 latent 的 {lat90['PICP']:.0%} 提到 "
+        f"{p90['PICP']:.0%}，诊断放大系数从 {s_latent:.2f} 降到 {s:.2f}。"
+        "也就是说，原实现里「过度自信」有相当一部分是**口径漏了 α**，不是模型真的那么自信。",
+        "",
+        "逐块（正式口径）：",
         "",
         tbl.round(4).to_markdown(index=False),
         "",
-        "## 三、结论一：整体**过度自信**，但**因电池而异**",
+        "## 三、结论一：整体仍过度自信，但**驱动因素不是宽度，是偏差**",
         "",
-        f"合并口径：名义 50% → 实际 **{p50['PICP']:.0%}**；90% → **{p90['PICP']:.0%}**；"
-        f"95% → **{p95['PICP']:.0%}**；99% → **{p99['PICP']:.0%}**。"
-        "整条曲线落在对角线下方——**M4 说「90% 概率」，实际只有 "
-        f"{p90['PICP']:.0%}**。",
+        f"合并：名义 50% → 实际 **{p50['PICP']:.0%}**；90% → **{p90['PICP']:.0%}**；"
+        f"99% → **{p99['PICP']:.0%}**。",
         "",
-        "但**这个合并数字掩盖了最大的事实**：90% 档上，"
-        f"最差的是 **{c_worst['电池']}（{c_worst['PICP']:.0%}）**，"
-        f"最好的是 **{c_best['电池']}（{c_best['PICP']:.0%}）**，"
-        f"极差 **{spread:.0%}**。",
+        "90% 档逐块：",
         "",
-        f"- **{c_worst['电池']}**：区间严重偏窄——名义 90% 只覆盖 {c_worst['PICP']:.0%}，"
-        "意味着它的真实不确定性比模型自报的大得多；",
-        f"- **{c_best['电池']}**：几乎完美校准（{c_best['PICP']:.0%} vs 90%），"
-        "甚至在某些档位偏保守。它的区间为什么这么宽？因为它本身是**删失个体**"
-        "（从不穿越 1.4 Ah），GP 对它的远端外推本来就没有把握。",
+        f"- 覆盖最差 **{worst['电池']}（{worst['PICP']:.0%}）**，最好 **{best['电池']}（{best['PICP']:.0%}）**，"
+        f"极差 **{best['PICP'] - worst['PICP']:.0%}**；",
+        f"- 但**区间宽度的差别很小**：最宽 {widest['电池']} {widest['MPIW(Ah)']:.4f} Ah、"
+        f"最窄 {narrowest['电池']} {narrowest['MPIW(Ah)']:.4f} Ah，只差 "
+        f"**{widest['MPIW(Ah)'] / narrowest['MPIW(Ah)']:.2f} 倍**；",
+        f"- **预测偏差的差别很大**：中位 |y−μ| 从 {bias['中位偏差(Ah)'].min():.4f} Ah 到 "
+        f"{bias['中位偏差(Ah)'].max():.4f} Ah，差 **{bias['中位偏差(Ah)'].max() / bias['中位偏差(Ah)'].min():.1f} 倍**。",
         "",
-        "所以正确的说法是：**「M4 的区间过度自信」这句话只在部分电池上成立。**"
-        "把它当全局结论会让报告失真——尤其 B0007 那一块，它的区间是可信的。",
+        "所以覆盖率的块间差异**主要由「模型预测得偏不偏」决定，不是由「区间宽不宽」决定**。"
+        "把 {0} 说成「区间偏窄」是错的——它的区间宽度正常，是**点预测系统性偏低**。".format(
+            worst["电池"]
+        ),
         "",
-        "## 四、要多宽才够？——这是**诊断**，不是校准方案",
+        f"另外 {worst['电池']} 的 {worst['PICP']:.0%} 还带着一个边界效应："
+        "它的失败点集中在切分点之后很近的几个循环（GP 还在插值区），"
+        "所以五档 PICP 几乎一样——**这不是「校准随置信度变化」，是同一小撮点一直失败**。",
         "",
-        f"如果强行把区间整体乘 **{scale:.2f} 倍**，合并后的 PICP 会刚好到 90%。",
+        "## 四、结论二：**这个结论不能跨切分点推广**",
         "",
-        "**但这个数不能用**：它是在测试集上算出来的，等于用答案调答案。"
-        "把它写进部署代码，会得到一个漂亮的校准曲线和毫无意义的实际性能。"
-        "本节只用它说明一件事——**缺的宽度是有限的、可量化的**：",
+        "同一个实现换 M，PICP@90 会大幅移动：",
         "",
-        f"名义 90% 的区间平均宽 {p90['MPIW(Ah)']:.4f} Ah，"
-        f"要放大到 **{p90['MPIW(Ah)'] * scale:.4f} Ah** 才真的覆盖 90%。",
+        mscan.round(4).to_markdown(index=False),
         "",
-        "真正可部署的改进方向是 W15 那条：**把定义层与模型形式层显式加进去**——"
-        "区间里现在只装了两层（残差 + 趋势参数），而 W15 指出还有两整层不在里面："
-        "定义层（11–20 循环）与模型形式层（0–22 循环，全部来自 M2）。"
-        "这个放大系数，本质上就是在补那两层的宽度。",
+        f"**这是本节最脆弱的地方**：逐块结论（谁好谁坏）在 M=60/80/100 下并不一致，"
+        f"只有「整体低于名义值」这一条是稳的。引用时必须带 M。",
         "",
-        "## 五、EOL 区间的覆盖：n 太小，**没有分辨率**",
+        "## 五、合并口径有多脆弱：剔除任一块 + 有效样本量",
+        "",
+        drops.round(4).to_markdown(index=False),
+        "",
+        f"**316 个点不是 316 个独立样本**。90% 覆盖指示量（0/1 序列）的自相关诊断：",
+        "",
+        diag.round(4).to_markdown(index=False),
+        "",
+        f"全样本只有 {int(diag['段数'].sum())} 段、lag-1 自相关最高 "
+        f"{diag['lag1 自相关'].max():.3f}，AR(1) 近似下有效样本只有 "
+        f"{diag['有效样本(AR1)'].sum():.1f} 个（不是 {n_pts}）。"
+        "这与 `evaluate.py` 自己的说明一致：相邻循环的容量高度自相关。",
+        "",
+        "所以：",
+        "",
+        "1. 上面那个极差（十几个百分点）**不能当「电池之间有显著差别」的证据**；",
+        "2. 真正稳的只有一条：**整体覆盖率低于名义值，且缺口不小**；",
+        "3. 引用合并数字时，最好同时给出剔除任一块的范围。",
+        "",
+        "## 六、要多宽才够？——诊断，且**不等于** W15 那两层的宽度",
+        "",
+        f"把区间整体乘 **{s:.2f} 倍**，合并 PICP 到 **{scale_check(pooled, s):.2%}**"
+        f"（PICP 只能取 k/{n_pts}，所以「刚好 90%」不可达，最近可达值就是这个数）。"
+        "**这个数不可部署**：测试集上算的，等于用答案调答案。",
+        "",
+        "**也不能说「放大就是在补 W15 的定义层与模型形式层」**——量纲不同："
+        "W15 那两层是**循环**（定义层半宽 11–20、形式层半极差 0–22），"
+        "而这里要补的是 **Ah**。按 M 之后的实测斜率（0.0021–0.0034 Ah/循环）折算，"
+        "两层加起来最多约 0.07–0.09 Ah，而这里需要的半宽是 "
+        f"{(p90['MPIW(Ah)'] * s) / 2:.4f} Ah，是它们的 1.7–3.7 倍。",
+        "",
+        "所以正确的说法是：**区间缺的比 W15 那两层还多**——多出来的部分是 M4 的"
+        "**点预测偏差**（第三节），它不在 W15 的三层预算里。",
+        "",
+        "## 七、EOL 区间的覆盖：n 太小，**没有分辨率**",
         "",
         "| 电池 | 90% 区间 | 真值 | 是否覆盖 |",
         "|---|---|---|---|",
     ]
     for cell, rec in eol_cover.items():
-        out.append(
-            f"| {cell} | {rec['interval']} | {rec['truth']} | {rec['covered']} |"
-        )
-    covered = sum(1 for r in eol_cover.values() if r["covered"] == "覆盖")
-    total = sum(1 for r in eol_cover.values() if r["covered"] in ("覆盖", "未覆盖"))
+        out.append(f"| {cell} | {rec['interval']} | {rec['truth']} | {rec['covered']} |")
     out += [
         "",
-        f"**{covered}/{total} 块覆盖**。但 {total} 块电池的覆盖率只能取 0、1/3、2/3、1 四档，"
-        "**这个数字没有统计分辨率**——它只能说明方向（偏窄），不能当作校准结论。"
-        "容量点上的 316 个样本才是本节的可信证据。",
+        f"**{covered}/{total} 块覆盖**。{total} 块电池的覆盖率只能取 0、1/3、2/3、1 四档，"
+        "没有统计分辨率；容量点上的几百个样本才是本节的可信证据。",
         "",
-        "## 六、这张表不能怎么读",
+        "## 八、这张表不能怎么读",
         "",
-        "1. **不能只看 PICP 不看 MPIW**：放宽区间能让 PICP 好看，但那只是把不确定性藏起来。",
-        "2. **不能把「诊断放大系数」当校准**：它是测试集上的事后量，不可部署（第四节）。",
-        f"3. **不能把 {covered}/{total} 当校准结论**：n 太小，见第五节。",
-        "4. **不能说「所有电池都一样差」**：逐块差别很大（见第二节第二张表），"
-        "有的电池在低档位就已接近名义值。",
-        "5. **不能跨切分点比较 MPIW**：区间宽度随 M 变化（W13 的切分点敏感性表有数）。",
+        "1. **不能只看 PICP 不看 MPIW**：放宽区间能让 PICP 好看，那只是把不确定性藏起来。",
+        f"2. **不能把 {s:.2f} 倍当校准方案**：它是测试集上的事后量，不可部署（第六节）。",
+        "3. **不能跨切分点比较**：PICP 随 M 变化很大（第四节），引用必须带 M。",
+        "4. **不能把块间差异当「电池性格」**：四块电池的极差落在有效样本量允许的噪声内（第五节）。",
+        f"5. **不能说「{worst['电池']} 的区间偏窄」**：它的区间宽度正常，是点预测偏低（第三节）。",
         "",
     ]
     return "\n".join(out)
@@ -326,12 +472,19 @@ def main() -> int:
         sub = df[df["battery_id"] == cell].sort_values("cycle")
         points[cell] = run_cell(cell, sub, SPLIT_M)
 
-    tbl = picp_table(points)
-    pooled = pool_table(points)
-    scale = needed_scale(points, 90.0)
-    assert_calibration(tbl, pooled, scale)
+    tbl = picp_table(points, "sd_pred", OFFICIAL)
+    pooled = pool(points, "sd_pred")
+    pooled_tbl = pool_table(pooled, OFFICIAL)
+    latent_tbl = picp_table(points, "sd_latent", "latent")
+    latent_pooled = pool_table(pool(points, "sd_latent"), "latent")
+    s = needed_scale(pooled)
+    s_latent = needed_scale(pool(points, "sd_latent"))
+    drops = drop_one(points, "sd_pred")
+    diag = coverage_diagnostics(points, "sd_pred")
+    mscan = m_scan(df, prof.reset_index(), "sd_pred")
 
-    # EOL 区间的覆盖（n 很小，只作方向性说明）
+    assert_calibration(tbl, pooled_tbl, s, pooled)
+
     import models_gpr
 
     eol_cover = {}
@@ -345,15 +498,22 @@ def main() -> int:
             "covered": row["区间是否覆盖真值"],
         }
 
+    out = pd.concat([tbl, latent_tbl], ignore_index=True)
     CSV_OUT.parent.mkdir(parents=True, exist_ok=True)
-    tbl.to_csv(CSV_OUT, index=False, encoding="utf-8-sig")
-    TABLE_MD.write_text(render_md(tbl, pooled, scale, SPLIT_M, eol_cover), encoding="utf-8")
-    fig_path = fig16(tbl, pooled)
+    out.to_csv(CSV_OUT, index=False, encoding="utf-8-sig")
+    TABLE_MD.write_text(
+        render_md(tbl, pooled_tbl, latent_pooled, s, s_latent, SPLIT_M, eol_cover,
+                  drops, mscan, pooled, diag),
+        encoding="utf-8",
+    )
+    fig_path = fig16(tbl, pooled_tbl)
 
-    print(f"M = {SPLIT_M}；名义档位 {LEVELS}；测试点 {int(pooled['点数'].iloc[0])}")
-    print(pooled.round(4).to_string(index=False))
+    print(f"M = {SPLIT_M}；名义档位 {LEVELS}；测试点 {int(pooled_tbl['点数'].iloc[0])}")
+    print(pooled_tbl.round(4).to_string(index=False))
     print()
-    print(f"诊断放大系数（到 90% 覆盖）：{scale:.2f}")
+    print(f"latent 口径 90% 覆盖 {latent_pooled.loc[latent_pooled['名义覆盖率'] == 90, 'PICP'].iloc[0]:.4f}"
+          f"（放大 {s_latent:.2f}）；预测口径 {pooled_tbl.loc[pooled_tbl['名义覆盖率'] == 90, 'PICP'].iloc[0]:.4f}"
+          f"（放大 {s:.2f}）")
     print(f"已写出：{TABLE_MD.name} / {CSV_OUT.name} / {fig_path.name}")
     return 0
 

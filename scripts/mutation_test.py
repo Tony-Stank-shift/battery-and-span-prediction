@@ -3,8 +3,8 @@
 一个从不失败的断言等于没有断言。做法是手工注入已知错误，
 看对应的断言是否**按预期炸掉**。每次注入都必须让管线以非零退出码结束。
 
-当前 **33 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + W12 两条 +
-W13 五条 + W15 四条 + W16 四条 + 一条回归用例（W8-R1）。
+当前 **38 条**：W7 六条 + W8 四条 + W9 一条 + W10 四条 + W11 两条 + W12 两条 +
+W13 五条 + W15 四条 + W16 五条 + W17 两条 + W18 三条 + 一条回归用例（W8-R1）。
 
 （跑得比早期慢很多：W16 的变异要真跑整条 t* 扫描，单条约 1 分钟。）
 
@@ -343,30 +343,29 @@ def main() -> int:
     )
 
 
-    # --- W18 变异 1：把区间的上下界写反（PICP 直接归零）---
+    # --- W18 变异 1：PICP 反号（模拟区间上下界写反的后果）---
     _orig_picp = calibration.picp_table
 
-    def swapped_intervals(points):
-        out = _orig_picp(points)
-        # 把每行的 PICP 换成 1 - PICP，模拟「上下界互换」后的结果
+    def swapped_intervals(points, sd_key, label):
+        out = _orig_picp(points, sd_key, label)
         out["PICP"] = 1.0 - out["PICP"]
         return out
 
     results.append(
         run_case(
-            "W18-M1 区间上下界互换（PICP 变成 1−PICP）",
+            "W18-M1 PICP 反号（模拟区间上下界互换）",
             calibration,
             {"attr": "picp_table", "new": swapped_intervals},
-            "随名义覆盖率不单调",
+            "的 PICP 不随名义覆盖率单调",
         )
     )
 
-    # --- W18 变异 2：把区间放宽 10 倍（PICP 冲到 100%，过度自信消失）---
+    # --- W18 变异 2：把区间标准差放大 10 倍（覆盖冲满）---
     _orig_run_cell2 = calibration.run_cell
 
     def wide_intervals(cell, sub, m):
         d = _orig_run_cell2(cell, sub, m)
-        d["标准差"] = d["标准差"] * 10.0
+        d["sd_pred"] = d["sd_pred"] * 10.0
         return d
 
     results.append(
@@ -374,7 +373,7 @@ def main() -> int:
             "W18-M2 把区间标准差放大 10 倍（覆盖冲满）",
             calibration,
             {"attr": "run_cell", "new": wide_intervals},
-            "没有偏窄",
+            "区间实际覆盖",
         )
     )
 
@@ -383,8 +382,8 @@ def main() -> int:
         run_case(
             "W18-M3 诊断放大系数被算成 0.5",
             calibration,
-            {"attr": "needed_scale", "new": lambda points, target=90.0: 0.5},
-            "诊断放大系数",
+            {"attr": "needed_scale", "new": lambda pooled, target=90.0: 0.5},
+            "needed_scale 的算法错了",
         )
     )
 
