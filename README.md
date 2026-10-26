@@ -118,21 +118,43 @@ python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/
 ## 目录结构
 
 ```
-src/          已建：config / load_data / sanity_check / preprocess / figures / explore / individual /
-              regeneration / sensitivity / features / evaluate / models_parametric / models_ml /
-              models_gpr / compare / uncertainty / warning / amplification / calibration / strategy
-              计划中：无（W20 起是包装与交付）
+src/          20 个模块：config / load_data / sanity_check / preprocess / figures / explore /
+              individual / regeneration / sensitivity / features / evaluate / models_parametric /
+              models_ml / models_gpr / compare / uncertainty / warning / amplification /
+              calibration / strategy
 scripts/      run_all.py 一键重跑（17 步，支持 --check 对账）；
               manifest.py 产物清单（生成/校验 MANIFEST.sha256）；
+              build_report.py / check_report.py  Word 报告与自检；
+              build_ppt.py / check_ppt.py / build_script.py   PPT、PPT 自检、逐字稿；
               mutation_test.py 变异测试（42 条）；adversarial_test.py 病态输入（43 条）
 outputs/      图表与指标（全部由代码生成，不含手工修改）
-              figures/fig01–fig17；tables/… model_comparison.md, uncertainty_budget.md,
-              warning_time.md, error_amplification.md, interval_calibration.md, strategy.md；
-              metrics/… 同名 CSV
+              figures/fig01–fig17；tables/ 16 个 md + 1 个 csv；metrics/ 6 个 csv
 MANIFEST.sha256  40 个产物的 SHA256 + 生成环境（放仓库根，供清空重建后对账）
-report/       计划中：Word 报告 / PPT / 演讲逐字稿（W21–W23 生成）
-docs/         项目状态与决策记录
+report/       交付物：20_题3_黄锦添_项目报告.docx（9 章 / 15 图 / 7 表）
+                        20_题3_黄锦添.pptx（9 页，备注栏即逐字稿）
+docs/         文档与记录（见下）
 data/raw/     课程下发的 636 行数据
+```
+
+## 交付物与文档索引
+
+| 交付物 | 文件 | 说明 |
+|---|---|---|
+| Word 报告 | [report/20_题3_黄锦添_项目报告.docx](report/20_题3_黄锦添_项目报告.docx) | 9 章 / 15 图 / 7 表，目录为 Word 域（Ctrl+A → F9 更新） |
+| 汇报 PPT | [report/20_题3_黄锦添.pptx](report/20_题3_黄锦添.pptx) | 9 页，每页一句结论；备注栏即演讲词 |
+| 演讲逐字稿 | [docs/W23_逐字稿.md](docs/W23_逐字稿.md) | 由 PPT 备注生成，含时间预算与录屏清单 |
+| 复现指南 | [docs/REPRODUCE.md](docs/REPRODUCE.md) | 环境、命令、退出码、常见坑 |
+| 项目状态 | [docs/STATE.md](docs/STATE.md) | 每个环节的结论/证据/坑/遗留 |
+| 决策记录 | [docs/DECISIONS.md](docs/DECISIONS.md) | 每条分析决策的理由（D1–D27） |
+| 交接记录 | [docs/W20_HANDOFF.md](docs/W20_HANDOFF.md) · [docs/W21_HANDOFF.md](docs/W21_HANDOFF.md) | 过程记录 |
+
+一键重建全部交付物（约 2 分钟）：
+
+```bash
+python scripts/run_all.py --check   # 17 步 + 产物对账
+python scripts/build_report.py      # Word 报告
+python scripts/build_ppt.py         # PPT
+python scripts/build_script.py      # 逐字稿
 ```
 
 ## ⚠️ 两条给未来自己的警告

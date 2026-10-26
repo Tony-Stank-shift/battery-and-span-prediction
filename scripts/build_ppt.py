@@ -285,7 +285,7 @@ def main() -> int:
     hi = sum_row["提前量比例"].max() * 100
     textbox(s, Inches(9.0), Inches(1.75), Inches(3.9), Inches(4.6),
             "替换时刻 =\n更严阈值(1.45)下的穿越点\n− 模型/数据裕度\n\n"
-            f"代价：提前 {lo:.0f}%–{hi:.0f}% 的寿命\n\n"
+            f"代价：提前 {lo:.1f}%–{hi:.1f}% 的寿命\n\n"
             "还有一块电池，等到预测稳定\n已经晚于建议替换点——\n"
             "对它只能「不等预测，直接换」。",
             size=13, line_spacing=1.35)
