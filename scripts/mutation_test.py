@@ -67,6 +67,7 @@ def main() -> int:
     import uncertainty
     import warning
     import amplification
+    import calibration
     import models_ml
     import models_parametric
     import models_gpr
@@ -341,6 +342,51 @@ def main() -> int:
         )
     )
 
+
+    # --- W18 变异 1：把区间的上下界写反（PICP 直接归零）---
+    _orig_picp = calibration.picp_table
+
+    def swapped_intervals(points):
+        out = _orig_picp(points)
+        # 把每行的 PICP 换成 1 - PICP，模拟「上下界互换」后的结果
+        out["PICP"] = 1.0 - out["PICP"]
+        return out
+
+    results.append(
+        run_case(
+            "W18-M1 区间上下界互换（PICP 变成 1−PICP）",
+            calibration,
+            {"attr": "picp_table", "new": swapped_intervals},
+            "随名义覆盖率不单调",
+        )
+    )
+
+    # --- W18 变异 2：把区间放宽 10 倍（PICP 冲到 100%，过度自信消失）---
+    _orig_run_cell2 = calibration.run_cell
+
+    def wide_intervals(cell, sub, m):
+        d = _orig_run_cell2(cell, sub, m)
+        d["标准差"] = d["标准差"] * 10.0
+        return d
+
+    results.append(
+        run_case(
+            "W18-M2 把区间标准差放大 10 倍（覆盖冲满）",
+            calibration,
+            {"attr": "run_cell", "new": wide_intervals},
+            "没有偏窄",
+        )
+    )
+
+    # --- W18 变异 3：诊断放大系数算成 0.5（「要多宽才够」说不通）---
+    results.append(
+        run_case(
+            "W18-M3 诊断放大系数被算成 0.5",
+            calibration,
+            {"attr": "needed_scale", "new": lambda points, target=90.0: 0.5},
+            "诊断放大系数",
+        )
+    )
 
     # --- W17 变异 1：一步容量误差放大 10 倍（放大倍数被压到 1 以下）---
     _orig_run_cell = amplification.run_cell
