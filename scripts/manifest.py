@@ -34,6 +34,14 @@ import argparse
 import hashlib
 import platform
 import sys
+
+# Windows 默认控制台是 GBK，print 出 ✓/✗ 会抛 UnicodeEncodeError；
+# 在入口处强制 UTF-8，保证 `run_all.py --check` 在任何控制台都不崩。
+try:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+    sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+except AttributeError:  # pragma: no cover
+    pass
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]

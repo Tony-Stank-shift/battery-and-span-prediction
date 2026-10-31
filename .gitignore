@@ -24,3 +24,5 @@ outputs/_cache/
 
 # ---- 渲染预览（LibreOffice Kit 临时目录，不进仓库） ----
 .dsh-office-*/
+
+docs/_archive/

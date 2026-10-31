@@ -76,7 +76,7 @@ python scripts/adversarial_test.py  # 病态输入：43 条（NaN/常数/重复/
 ### 关于运行环境
 
 本项目**不使用虚拟环境**，依赖直接装在用户级 site-packages（`%APPDATA%\Python\Python312\site-packages`）。
-原因不是图省事：在 DSH 文件沙箱下 `pip` 与 `python -m venv` 都会因为无法对临时目录执行 chmod 而失败，详见 `docs/STATE.md` 的「环境坑」。**你在自己的机器上跑完全可以用 venv。**
+原因不是图省事：受限账户下 `pip` 与 `python -m venv` 对临时目录执行 chmod 会失败，本项目因此直接使用系统解释器。**在自己的机器上可以直接用 venv。**
 
 ## 已知数据陷阱
 
@@ -140,13 +140,13 @@ data/raw/     课程下发的 636 行数据
 
 | 交付物 | 文件 | 说明 |
 |---|---|---|
-| Word 报告 | [report/20_题3_黄锦添_项目报告.docx](report/20_题3_黄锦添_项目报告.docx) | 9 章 / 15 图 / 7 表，目录为 Word 域（Ctrl+A → F9 更新） |
-| 汇报 PPT | [report/20_题3_黄锦添.pptx](report/20_题3_黄锦添.pptx) | 9 页，每页一句结论；备注栏即演讲词 |
-| 演讲逐字稿 | [docs/W23_逐字稿.md](docs/W23_逐字稿.md) | 由 PPT 备注生成，含时间预算与录屏清单 |
+| Word 报告 | [report/20_题3_黄锦添_项目报告_v3.docx](report/20_题3_黄锦添_项目报告_v3.docx) | 9 章 / 13 图 / 11 表，静态目录页 |
+| 汇报 PPT | [report/20_题3_黄锦添_v3.pptx](report/20_题3_黄锦添_v3.pptx) | 13 页正文 + 4 页备用；备注栏即演讲词 |
 | 复现指南 | [docs/REPRODUCE.md](docs/REPRODUCE.md) | 环境、命令、退出码、常见坑 |
-| 项目状态 | [docs/STATE.md](docs/STATE.md) | 每个环节的结论/证据/坑/遗留 |
 | 决策记录 | [docs/DECISIONS.md](docs/DECISIONS.md) | 每条分析决策的理由（D1–D27） |
-| 交接记录 | [docs/W20_HANDOFF.md](docs/W20_HANDOFF.md) · [docs/W21_HANDOFF.md](docs/W21_HANDOFF.md) | 过程记录 |
+| 演讲逐字稿 | [docs/W23_逐字稿_v2.md](docs/W23_逐字稿_v2.md) | 与 13 页 deck 对应，含时间预算 |
+| 收官检查 | [docs/W25_收官检查.md](docs/W25_收官检查.md) | 30 项验收逐条留证 |
+| 知识点讲义 | [docs/W27_第四到七章知识点讲义.md](docs/W27_第四到七章知识点讲义.md) | 第 4–7 章方法背景 |
 
 一键重建全部交付物（约 2 分钟）：
 
